@@ -1,0 +1,136 @@
+# =============================================================================
+# EnergyMonitor - Pila completa LOCAL (base de datos + MQTT + backend + frontend)
+# =============================================================================
+# Levanta todo el sistema en contenedores sobre Docker, sin depender de un servidor:
+#
+#   cd infra
+#   cp .env.example .env          # rellena los CHANGE_ME
+#   ./prepare.sh                  # genera las claves RSA y los certificados del broker
+#   docker compose up -d --build
+#
+# Servicios y puertos publicados:
+#   80    frontend (nginx): sirve la web y reenvia /api/ al backend (mismo origen, sin CORS)
+#   8080  backend (REST /api/v1)   [tambien abierto por comodidad de depuracion]
+#   8883  MQTT sobre TLS, para los dispositivos ESP32
+#   1883  MQTT sin TLS, solo en 127.0.0.1, para el backend
+#   3306  MySQL                   [abierto por comodidad de depuracion]
+#
+# La integracion MQTT ya esta hecha en el codigo: el broker delega la autenticacion de
+# cada dispositivo en el backend (POST /internal/mqtt/auth/user y /acl). Aqui solo se
+# pone al broker y al backend en la misma red Docker y se usa el mismo mosquitto.conf
+# que en produccion (devices/docker/mosquitto/mosquitto.conf), donde "backend" resuelve
+# al servicio de abajo.
+#
+# Para desplegar en un servidor se usa devices/docker/docker-compose.prod.yml, no este.
+
+name: energy-monitor
+
+services:
+  mysql:
+    image: mysql:8.4
+    container_name: energy-monitor-mysql
+    environment:
+      MYSQL_DATABASE: energy_monitor
+      MYSQL_USER: energy_app
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?MYSQL_PASSWORD is required}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?MYSQL_ROOT_PASSWORD is required}
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  backend:
+    build:
+      context: ../backend/energy-monitor-backend
+    image: energy-monitor-backend:local
+    container_name: energy-monitor-backend
+    # La imagen corre como uid 10001; BACKEND_UID/GID deben ser el dueño de ./keys
+    # para que el proceso pueda leer private.pem (ver README).
+    user: "${BACKEND_UID:-10001}:${BACKEND_GID:-10001}"
+    depends_on:
+      mysql:
+        condition: service_healthy
+    environment:
+      # Cualquier perfil distinto de "local" (el de application-local.yaml).
+      SPRING_PROFILES_ACTIVE: prod
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/energy_monitor?connectionTimeZone=UTC&forceConnectionTimeZoneToSession=true
+      SPRING_DATASOURCE_USERNAME: energy_app
+      SPRING_DATASOURCE_PASSWORD: ${MYSQL_PASSWORD:?MYSQL_PASSWORD is required}
+      SECURITY_JWT_PRIVATE_KEY_PATH: /run/keys/private.pem
+      SECURITY_JWT_PUBLIC_KEY_PATH: /run/keys/public.pem
+      SECURITY_RESET_PEPPER: ${SECURITY_RESET_PEPPER:?SECURITY_RESET_PEPPER is required}
+      SECURITY_CORS_ALLOWED_ORIGINS: ${SECURITY_CORS_ALLOWED_ORIGINS:-http://localhost}
+      MAIL_HOST: ${MAIL_HOST:-}
+      MAIL_PORT: ${MAIL_PORT:-587}
+      MAIL_USERNAME: ${MAIL_USERNAME:-}
+      MAIL_PASSWORD: ${MAIL_PASSWORD:-}
+      MAIL_FROM: ${MAIL_FROM:-}
+      # Mismo cliente OAuth que el frontend (VITE_GOOGLE_CLIENT_ID). El backend canjea el
+      # codigo de Google, asi que necesita el secreto, que nunca llega al navegador.
+      # Vacio en ambos = boton de Google desactivado (503).
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      # El backend habla con el broker por el listener interno (1883) de la misma red.
+      MQTT_BROKER_URL: tcp://mosquitto:1883
+      MQTT_BACKEND_USER: ${MQTT_BACKEND_USER:-em-backend}
+      MQTT_BACKEND_PASS: ${MQTT_BACKEND_PASS:?MQTT_BACKEND_PASS is required}
+      MQTT_CLIENT_ID: energy-monitor-backend-local
+      # Solo la red interna de Docker (y loopback) puede llamar a /internal/mqtt/auth/**.
+      MQTT_AUTH_ALLOWED_NETWORKS: 172.16.0.0/12,127.0.0.1/32
+      # Direccion del broker que la web escribe al modulo al vincularlo por Bluetooth:
+      # la IP de LAN de este PC (nunca localhost) o el dominio del broker.
+      DEVICE_MQTT_PUBLIC_HOST: ${DEVICE_MQTT_PUBLIC_HOST:?DEVICE_MQTT_PUBLIC_HOST is required}
+      DEVICE_MQTT_PUBLIC_PORT: ${DEVICE_MQTT_PUBLIC_PORT:-8883}
+      NOTIFICATION_WEB_URL: ${NOTIFICATION_WEB_URL:-http://localhost}
+      NOTIFICATION_VAPID_PUBLIC_KEY: ${NOTIFICATION_VAPID_PUBLIC_KEY:-}
+      NOTIFICATION_VAPID_PRIVATE_KEY: ${NOTIFICATION_VAPID_PRIVATE_KEY:-}
+    volumes:
+      - ./keys:/run/keys:ro
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+
+  mosquitto:
+    image: iegomez/mosquitto-go-auth:3.0.0-mosquitto_2.0.18
+    container_name: energy-monitor-mqtt
+    depends_on:
+      - backend
+    ports:
+      # Listener interno del backend, solo loopback.
+      - "127.0.0.1:1883:1883"
+      # Dispositivos por TLS: toda la LAN.
+      - "8883:8883"
+    volumes:
+      - ../devices/docker/mosquitto/mosquitto.conf:/etc/mosquitto/mosquitto.conf:ro
+      # Certificados de desarrollo (generate-dev-certs.sh). Deben existir antes de arrancar.
+      - ../devices/docker/mosquitto/certs:/mosquitto/certs:ro
+      - mosquitto-data:/mosquitto/data
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ../frontend/energy-monitor-web
+      args:
+        # Vacío = rutas relativas; nginx reenvía /api/ al backend (sin CORS).
+        VITE_API_BASE_URL: ""
+        VITE_GOOGLE_CLIENT_ID: ${VITE_GOOGLE_CLIENT_ID:-}
+    image: energy-monitor-frontend:local
+    container_name: energy-monitor-frontend
+    depends_on:
+      - backend
+    ports:
+      - "80:80"
+    restart: unless-stopped
+
+volumes:
+  mysql-data:
+  mosquitto-data:

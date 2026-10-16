@@ -2,21 +2,29 @@
 # =============================================================================
 # EnergyMonitor - Otorga el rol global ADMIN a una cuenta ya registrada.
 # =============================================================================
-# Uso:  ./make-admin.sh correo@ejemplo.com
+# Uso:  ./make-admin.sh correo@ejemplo.com           pila local (.env)
+#       ./make-admin.sh --prod correo@ejemplo.com    servidor (.env.prod, docker-compose.prod.yml)
 #
 # Requisitos: la pila debe estar levantada y la cuenta debe existir (haberla creado
 # desde la web: registro con correo o "Iniciar sesion con Google"). No crea cuentas.
 #
-# Lee la contrasena de root de MySQL desde infra/.env (MYSQL_ROOT_PASSWORD).
+# Lee la contrasena de root de MySQL desde infra/.env o infra/.env.prod (MYSQL_ROOT_PASSWORD).
 # Es idempotente: si la cuenta ya es ADMIN no falla ni duplica, y si el rol se le
 # habia revocado desde la web (fila con deleted_at) lo reactiva.
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
+env_file="$here/.env"
+compose=(docker compose --project-directory "$here" -f "$here/docker-compose.yml" --env-file "$env_file")
+if [[ "${1:-}" == "--prod" ]]; then
+  shift
+  env_file="$here/.env.prod"
+  compose=(docker compose --project-directory "$here" -f "$here/docker-compose.prod.yml" --env-file "$env_file")
+fi
 # El backend guarda los correos sin espacios y en minusculas.
 email="$(printf '%s' "${1:-}" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')"
 if [[ -z "$email" ]]; then
-  echo "Uso: ./make-admin.sh correo@ejemplo.com" >&2
+  echo "Uso: ./make-admin.sh [--prod] correo@ejemplo.com" >&2
   exit 2
 fi
 # El correo va dentro del SQL: solo se aceptan los caracteres de una direccion normal.
@@ -25,18 +33,19 @@ if [[ ! "$email" =~ ^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]+$ ]]; then
   exit 2
 fi
 
-root_pass="$(grep -E '^MYSQL_ROOT_PASSWORD=' "$here/.env" | cut -d= -f2-)"
+root_pass="$(grep -E '^MYSQL_ROOT_PASSWORD=' "$env_file" 2>/dev/null | cut -d= -f2- || true)"
 if [[ -z "$root_pass" ]]; then
-  echo "No encontre MYSQL_ROOT_PASSWORD en $here/.env" >&2
+  echo "No encontre MYSQL_ROOT_PASSWORD en $env_file" >&2
   exit 1
 fi
 
-run_sql() { docker exec -i -e MYSQL_PWD="$root_pass" energy-monitor-mysql mysql -uroot energy_monitor "$@"; }
+# Por nombre de servicio, no de contenedor: en el servidor el contenedor se llama distinto.
+run_sql() { "${compose[@]}" exec -T -e MYSQL_PWD="$root_pass" mysql mysql -uroot energy_monitor "$@"; }
 
 exists="$(run_sql -N -e "SELECT COUNT(*) FROM user WHERE email='$email' AND deleted_at IS NULL;")"
 if [[ "$exists" = "0" ]]; then
   echo "No existe una cuenta activa con el correo '$email'." >&2
-  echo "Crea la cuenta primero en http://localhost (registro o Google) y repite." >&2
+  echo "Crea la cuenta primero desde la web (registro o Google) y repite." >&2
   exit 1
 fi
 

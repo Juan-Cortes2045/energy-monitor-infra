@@ -7,11 +7,13 @@
 #
 # Crea:
 #   infra/keys/private.pem, public.pem   par RSA de los JWT del backend
-#   devices/docker/mosquitto/certs/*     CA y certificado de desarrollo del broker
-#   devices/esp32-pzem-monitor/dev_ca.h  (lo escribe el script de certificados)
+#   infra/mosquitto/certs/*              CA y certificado de desarrollo del broker
+#   backend/energy-monitor-backend/firmware/esp32-pzem-monitor/dev_ca.h  (lo escribe el script
+#                                        de certificados; CA que embebe el firmware)
 #
-# Es idempotente: no regenera nada que ya exista (los dispositivos ya vinculados
-# seguirian confiando en la misma CA).
+# Se puede repetir: el par RSA y la CA se reutilizan si ya existen (los dispositivos ya
+# flasheados siguen confiando en la misma CA); solo se reemite el certificado del broker
+# para las IPs actuales del PC y DEVICE_MQTT_PUBLIC_HOST.
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
@@ -62,8 +64,15 @@ if [[ -f "$here/.env" ]]; then
 fi
 
 # ── 3. Certificados de desarrollo del broker ────────────────────────────────────
+# El certificado se emite para las IPs actuales de este PC. DEVICE_MQTT_PUBLIC_HOST (la
+# direccion que se escribe al modulo) se agrega siempre: si no, al ejecutar prepare.sh en
+# otra red el certificado dejaria de cubrir la IP a la que se conectan los dispositivos.
+public_host=""
+if [[ -f "$here/.env" ]]; then
+  public_host="$(grep -E '^DEVICE_MQTT_PUBLIC_HOST=' "$here/.env" | cut -d= -f2- || true)"
+fi
 echo "Generando los certificados de desarrollo del broker ..."
-(cd "$here/../devices/docker/mosquitto" && ./generate-dev-certs.sh)
+(cd "$here/mosquitto" && ./generate-dev-certs.sh ${public_host:+"$public_host"})
 
 echo
 echo "Listo. Siguientes pasos:"

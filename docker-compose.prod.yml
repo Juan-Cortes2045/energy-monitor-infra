@@ -1,0 +1,129 @@
+# =============================================================================
+# EnergyMonitor - Despliegue en un servidor (MySQL + backend + broker + frontend)
+# =============================================================================
+# En el servidor, con los repositorios clonados uno al lado del otro (ver README):
+#   cp .env.prod.example .env.prod      # y rellenalo
+#   docker compose -f docker-compose.prod.yml --env-file .env.prod up -d --build
+#
+# Puertos publicados:
+#   8883  MQTT sobre TLS, para los dispositivos (internet)
+#   WEB_PORT (8081) en 127.0.0.1: la web y la API. Delante va un proxy HTTPS (Caddy/nginx)
+#         que reenvia TODO el dominio aqui; el nginx del frontend solo pasa /api/ al
+#         backend, asi que /internal/** nunca queda expuesto.
+#   8080  backend en 127.0.0.1, solo para health y depuracion desde el propio servidor
+# El listener MQTT sin TLS (1883) y MySQL quedan dentro de la red de Docker.
+#
+# El mosquitto.conf es el mismo que en desarrollo; aqui "backend" es el contenedor.
+# El certificado del broker es de Let's Encrypt (MQTT_CERT_DIR), no el de desarrollo.
+
+name: energy-monitor-prod
+
+services:
+  mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_DATABASE: energy_monitor
+      MYSQL_USER: energy_app
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?MYSQL_PASSWORD is required}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?MYSQL_ROOT_PASSWORD is required}
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    volumes:
+      - mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  backend:
+    build:
+      context: ${BACKEND_CONTEXT:-../backend/energy-monitor-backend}
+    # La imagen corre como uid 10001. JWT_KEYS_DIR/private.pem debe poder leerlo ese usuario:
+    # haz chown 10001 a las claves o pon en BACKEND_UID/BACKEND_GID el dueño de los archivos.
+    user: "${BACKEND_UID:-10001}:${BACKEND_GID:-10001}"
+    depends_on:
+      mysql:
+        condition: service_healthy
+    environment:
+      # Cualquier perfil distinto de "local" (el de application-local.yaml).
+      SPRING_PROFILES_ACTIVE: prod
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/energy_monitor?connectionTimeZone=UTC&forceConnectionTimeZoneToSession=true
+      SPRING_DATASOURCE_USERNAME: energy_app
+      SPRING_DATASOURCE_PASSWORD: ${MYSQL_PASSWORD}
+      SECURITY_JWT_PRIVATE_KEY_PATH: /run/keys/private.pem
+      SECURITY_JWT_PUBLIC_KEY_PATH: /run/keys/public.pem
+      SECURITY_RESET_PEPPER: ${SECURITY_RESET_PEPPER:?SECURITY_RESET_PEPPER is required}
+      SECURITY_CORS_ALLOWED_ORIGINS: ${SECURITY_CORS_ALLOWED_ORIGINS:?SECURITY_CORS_ALLOWED_ORIGINS is required}
+      MAIL_HOST: ${MAIL_HOST:-smtp.gmail.com}
+      MAIL_PORT: ${MAIL_PORT:-587}
+      MAIL_USERNAME: ${MAIL_USERNAME:-}
+      MAIL_PASSWORD: ${MAIL_PASSWORD:-}
+      MAIL_FROM: ${MAIL_FROM:-}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      MQTT_BROKER_URL: tcp://mosquitto:1883
+      MQTT_BACKEND_USER: ${MQTT_BACKEND_USER:-em-backend}
+      MQTT_BACKEND_PASS: ${MQTT_BACKEND_PASS:?MQTT_BACKEND_PASS is required}
+      # Solo la red interna de Docker puede llamar a /internal/mqtt/auth/**.
+      MQTT_AUTH_ALLOWED_NETWORKS: 172.16.0.0/12,127.0.0.1/32
+      # Direccion del broker que la web escribe al modulo al vincularlo por Bluetooth.
+      DEVICE_MQTT_PUBLIC_HOST: ${DEVICE_MQTT_PUBLIC_HOST:?DEVICE_MQTT_PUBLIC_HOST is required}
+      DEVICE_MQTT_PUBLIC_PORT: ${DEVICE_MQTT_PUBLIC_PORT:-8883}
+      NOTIFICATION_VAPID_PUBLIC_KEY: ${NOTIFICATION_VAPID_PUBLIC_KEY:-}
+      NOTIFICATION_VAPID_PRIVATE_KEY: ${NOTIFICATION_VAPID_PRIVATE_KEY:-}
+      # Push a las apps moviles por el relay de Expo. Vacio = push movil desactivado.
+      EXPO_ACCESS_TOKEN: ${EXPO_ACCESS_TOKEN:-}
+      NOTIFICATION_WEB_URL: ${NOTIFICATION_WEB_URL:?NOTIFICATION_WEB_URL is required}
+    volumes:
+      - ${JWT_KEYS_DIR:?JWT_KEYS_DIR is required}:/run/keys:ro
+    ports:
+      - "127.0.0.1:8080:8080"
+    stop_grace_period: 30s
+    restart: unless-stopped
+
+  # La imagen del broker no trae /mosquitto/data: el volumen nace con dueño root y Mosquitto
+  # (uid 1000) no podria guardar su base. Este paso se lo entrega a uid 1000.
+  mosquitto-data-owner:
+    image: iegomez/mosquitto-go-auth:3.0.0-mosquitto_2.0.18
+    user: "0:0"
+    entrypoint: ["chown", "-R", "1000:1000", "/mosquitto/data"]
+    volumes:
+      - mosquitto-data:/mosquitto/data
+    restart: "no"
+
+  mosquitto:
+    image: iegomez/mosquitto-go-auth:3.0.0-mosquitto_2.0.18
+    depends_on:
+      backend:
+        condition: service_started
+      mosquitto-data-owner:
+        condition: service_completed_successfully
+    ports:
+      - "8883:8883"
+    volumes:
+      - ./mosquitto/mosquitto.conf:/etc/mosquitto/mosquitto.conf:ro
+      # server.crt = fullchain.pem y server.key = privkey.pem de Let's Encrypt para el
+      # dominio del broker (ver README, "Produccion").
+      - ${MQTT_CERT_DIR:?MQTT_CERT_DIR is required}:/mosquitto/certs:ro
+      - mosquitto-data:/mosquitto/data
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ${FRONTEND_CONTEXT:-../frontend/energy-monitor-web}
+      args:
+        # Vacio = rutas relativas; nginx reenvia /api/ al backend (mismo origen).
+        VITE_API_BASE_URL: ""
+        VITE_GOOGLE_CLIENT_ID: ${VITE_GOOGLE_CLIENT_ID:-}
+    depends_on:
+      - backend
+    ports:
+      - "127.0.0.1:${WEB_PORT:-8081}:80"
+    restart: unless-stopped
+
+volumes:
+  mysql-data:
+  mosquitto-data:

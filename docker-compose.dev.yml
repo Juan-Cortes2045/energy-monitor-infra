@@ -1,0 +1,24 @@
+# =============================================================================
+# EnergyMonitor - Modo desarrollo: MySQL y broker en Docker, backend en este PC
+# =============================================================================
+# Para trabajar el backend desde el IDE o con ./mvnw (spring-boot:run y test):
+#
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d mysql mosquitto
+#   cd ../backend/energy-monitor-backend && ./mvnw spring-boot:run
+#
+# Es la misma base y el mismo broker que la pila completa (mismos volumenes y .env),
+# asi que application-local.yaml del backend debe usar MYSQL_PASSWORD de infra/.env.
+# Si la pila completa estaba arriba, primero: docker compose stop backend frontend
+#
+# El backend corre en el host, asi que "backend" (el que autentica a cada cliente MQTT)
+# apunta al host con host-gateway. En Linux con ufw hace falta permitir la red de Docker:
+#   sudo ufw allow from 172.16.0.0/12 to any port 8080 proto tcp comment 'mosquitto -> backend'
+
+services:
+  mosquitto:
+    # Sin el contenedor del backend: el broker solo espera a que su volumen tenga dueño.
+    depends_on: !override
+      mosquitto-data-owner:
+        condition: service_completed_successfully
+    extra_hosts:
+      - "backend:host-gateway"

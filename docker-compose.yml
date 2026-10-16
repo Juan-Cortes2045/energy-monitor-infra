@@ -13,15 +13,17 @@
 #   8080  backend (REST /api/v1)   [tambien abierto por comodidad de depuracion]
 #   8883  MQTT sobre TLS, para los dispositivos ESP32
 #   1883  MQTT sin TLS, solo en 127.0.0.1, para el backend
-#   3306  MySQL                   [abierto por comodidad de depuracion]
+#   3306  MySQL, solo en 127.0.0.1 [para depurar desde este PC]
 #
 # La integracion MQTT ya esta hecha en el codigo: el broker delega la autenticacion de
 # cada dispositivo en el backend (POST /internal/mqtt/auth/user y /acl). Aqui solo se
 # pone al broker y al backend en la misma red Docker y se usa el mismo mosquitto.conf
-# que en produccion (devices/docker/mosquitto/mosquitto.conf), donde "backend" resuelve
-# al servicio de abajo.
+# que en produccion (./mosquitto/mosquitto.conf), donde "backend" resuelve al servicio
+# de abajo.
 #
-# Para desplegar en un servidor se usa devices/docker/docker-compose.prod.yml, no este.
+# Otros modos (ver README):
+#   docker-compose.dev.yml   solo MySQL + broker; el backend corre en este PC (./mvnw)
+#   docker-compose.prod.yml  despliegue en un servidor (Let's Encrypt, proxy HTTPS delante)
 
 name: energy-monitor
 
@@ -38,7 +40,8 @@ services:
       - --character-set-server=utf8mb4
       - --collation-server=utf8mb4_unicode_ci
     ports:
-      - "3306:3306"
+      # Solo loopback: para depurar desde este PC sin exponer la base a la red (Wi-Fi/hotspot).
+      - "127.0.0.1:3306:3306"
     volumes:
       - mysql-data:/var/lib/mysql
     healthcheck:
@@ -50,7 +53,7 @@ services:
 
   backend:
     build:
-      context: ../backend/energy-monitor-backend
+      context: ${BACKEND_CONTEXT:-../backend/energy-monitor-backend}
     image: energy-monitor-backend:local
     container_name: energy-monitor-backend
     # La imagen corre como uid 10001; BACKEND_UID/GID deben ser el dueño de ./keys
@@ -93,32 +96,51 @@ services:
       NOTIFICATION_WEB_URL: ${NOTIFICATION_WEB_URL:-http://localhost}
       NOTIFICATION_VAPID_PUBLIC_KEY: ${NOTIFICATION_VAPID_PUBLIC_KEY:-}
       NOTIFICATION_VAPID_PRIVATE_KEY: ${NOTIFICATION_VAPID_PRIVATE_KEY:-}
+      # Push a las apps moviles por el relay de Expo. Vacio = push movil desactivado.
+      EXPO_ACCESS_TOKEN: ${EXPO_ACCESS_TOKEN:-}
     volumes:
       - ./keys:/run/keys:ro
     ports:
       - "8080:8080"
+    # Al parar, el backend se desuscribe del broker y cierra las peticiones en curso; con los
+    # 10 s por defecto Docker lo mataba a mitad (exit 137).
+    stop_grace_period: 30s
     restart: unless-stopped
+
+  # La imagen del broker no trae /mosquitto/data, asi que el volumen nace con dueño root y
+  # Mosquitto (uid 1000) no puede guardar su base ("Error saving in-memory database ...
+  # Permission denied"). Este paso le da el volumen a uid 1000 antes de arrancar el broker.
+  mosquitto-data-owner:
+    image: iegomez/mosquitto-go-auth:3.0.0-mosquitto_2.0.18
+    user: "0:0"
+    entrypoint: ["chown", "-R", "1000:1000", "/mosquitto/data"]
+    volumes:
+      - mosquitto-data:/mosquitto/data
+    restart: "no"
 
   mosquitto:
     image: iegomez/mosquitto-go-auth:3.0.0-mosquitto_2.0.18
     container_name: energy-monitor-mqtt
     depends_on:
-      - backend
+      backend:
+        condition: service_started
+      mosquitto-data-owner:
+        condition: service_completed_successfully
     ports:
       # Listener interno del backend, solo loopback.
       - "127.0.0.1:1883:1883"
       # Dispositivos por TLS: toda la LAN.
       - "8883:8883"
     volumes:
-      - ../devices/docker/mosquitto/mosquitto.conf:/etc/mosquitto/mosquitto.conf:ro
-      # Certificados de desarrollo (generate-dev-certs.sh). Deben existir antes de arrancar.
-      - ../devices/docker/mosquitto/certs:/mosquitto/certs:ro
+      - ./mosquitto/mosquitto.conf:/etc/mosquitto/mosquitto.conf:ro
+      # Certificados de desarrollo (prepare.sh). Deben existir antes de arrancar.
+      - ./mosquitto/certs:/mosquitto/certs:ro
       - mosquitto-data:/mosquitto/data
     restart: unless-stopped
 
   frontend:
     build:
-      context: ../frontend/energy-monitor-web
+      context: ${FRONTEND_CONTEXT:-../frontend/energy-monitor-web}
       args:
         # Vacío = rutas relativas; nginx reenvía /api/ al backend (sin CORS).
         VITE_API_BASE_URL: ""

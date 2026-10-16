@@ -1,7 +1,16 @@
-# infra — Pila completa local en Docker
+# infra — EnergyMonitor en Docker
 
-Levanta **todo** EnergyMonitor en contenedores sobre Docker, sin depender de un
-servidor: base de datos MySQL, broker MQTT, backend Spring Boot y frontend React.
+Todo lo de Docker de EnergyMonitor vive aquí: base de datos MySQL, broker MQTT (Mosquitto),
+backend Spring Boot y frontend React, en tres modos:
+
+| Modo | Archivos | Para qué |
+|---|---|---|
+| Pila completa local | `docker-compose.yml` | Correr todo el sistema en este PC (demo, pruebas de punta a punta) |
+| Desarrollo | `docker-compose.yml` + `docker-compose.dev.yml` | Solo MySQL y broker; el backend corre en el PC con `./mvnw` (IDE, tests) |
+| Producción | `docker-compose.prod.yml` + `.env.prod` | Servidor con dominio, Let's Encrypt y proxy HTTPS delante |
+
+Los `Dockerfile` siguen en su repositorio (`backend/energy-monitor-backend` y
+`frontend/energy-monitor-web`): cambian con su código, e infra los construye desde ahí.
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
@@ -16,10 +25,42 @@ servidor: base de datos MySQL, broker MQTT, backend Spring Boot y frontend React
 
 ## Requisitos
 
-- Docker Engine 24+ con el plugin `docker compose` (probado con Docker 29 / Compose v5).
+- Docker Engine 24+ con el plugin `docker compose` 2.24 o superior (probado con Docker 29 /
+  Compose v5). El modo desarrollo usa la etiqueta `!override`.
 - `openssl` (lo usa `prepare.sh`).
+- Los repositorios clonados uno al lado del otro:
 
-## Arranque rápido
+  ```bash
+  mkdir energy-monitor && cd energy-monitor
+  git clone https://github.com/Juan-Cortes2045/energy-monitor-infra.git infra
+  git clone https://github.com/Juan-Cortes2045/energy-monitor-backend.git backend/energy-monitor-backend
+  git clone https://github.com/Juan-Cortes2045/Energy-Monitor-application.git frontend/energy-monitor-web
+  ```
+
+  Otras rutas: `BACKEND_CONTEXT` y `FRONTEND_CONTEXT` en `.env`.
+
+## Estructura
+
+| Ruta | Versionado | Contenido |
+|---|---|---|
+| `docker-compose.yml` | sí | Pila completa local |
+| `docker-compose.dev.yml` | sí | Modo desarrollo (se combina con el anterior) |
+| `docker-compose.prod.yml` | sí | Servidor |
+| `.env.example` / `.env.prod.example` | sí | Plantillas de `.env` / `.env.prod` |
+| `prepare.sh` | sí | Claves RSA, `.env` y certificado de desarrollo del broker |
+| `make-admin.sh` | sí | Da el rol global `ADMIN` a una cuenta |
+| `mosquitto/mosquitto.conf` | sí | Configuración del broker (la misma en los tres modos) |
+| `mosquitto/generate-dev-certs.sh` | sí | CA y certificado de desarrollo (lo llama `prepare.sh`) |
+| `mosquitto/certs/` | **no** | CA, certificado y claves privadas del broker |
+| `keys/` | **no** | Par RSA de los JWT |
+| `.env`, `.env.prod` | **no** | Contraseñas y secretos |
+
+`generate-dev-certs.sh` escribe además
+`../backend/energy-monitor-backend/firmware/esp32-pzem-monitor/dev_ca.h` (ignorado por git), para
+que el firmware del ESP32 (que vive en el repo backend, ver `firmware/README.md`) confíe en la CA
+de desarrollo.
+
+## Arranque rápido (pila completa)
 
 ```bash
 cd infra
@@ -45,7 +86,8 @@ Swagger en <http://localhost:8080/swagger-ui.html> y `health` en
   ./make-admin.sh correo@ejemplo.com
   ```
 
-  (Lee `MYSQL_ROOT_PASSWORD` de `.env` y es idempotente.) Cierra sesión y vuelve a entrar
+  (Lee `MYSQL_ROOT_PASSWORD` de `.env` y es idempotente; si a la cuenta se le había revocado
+  `ADMIN` desde la web, se lo devuelve.) Cierra sesión y vuelve a entrar
   para ver la pantalla de **Administración**, desde donde ese admin ya puede dar `ADMIN` a
   otras cuentas.
 
@@ -70,25 +112,78 @@ El frontend se construye con `VITE_API_BASE_URL` **vacío**, así que el navegad
 llama a `/api/v1/...` en su propio origen y nginx lo reenvía a `backend:8080`
 (mismo origen: **no hace falta CORS**).
 
+## Modo desarrollo (backend en el PC)
+
+Para trabajar el backend desde el IDE o con `./mvnw spring-boot:run` / `./mvnw test`, levanta
+solo MySQL y el broker:
+
+```bash
+docker compose stop backend frontend     # si la pila completa estaba arriba
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d mysql mosquitto
+cd ../backend/energy-monitor-backend && ./mvnw spring-boot:run
+```
+
+- Es la **misma base y el mismo broker** que la pila completa (mismos volúmenes y `.env`): lo que
+  hagas en un modo se ve en el otro.
+- El backend del PC se conecta con `application-local.yaml` y `SPRING_DATASOURCE_PASSWORD` de su
+  `.env`: ambos deben tener `MYSQL_PASSWORD` de `infra/.env`.
+- En este modo `backend` (quien autentica cada cliente MQTT) apunta al host con `host-gateway`.
+  En Linux con `ufw` permite solo las redes de Docker, una vez:
+
+  ```bash
+  sudo ufw allow from 172.16.0.0/12 to any port 8080 proto tcp comment 'mosquitto -> backend'
+  ```
+
+- Para volver a la pila completa: `docker compose up -d` (recrea el broker sin `host-gateway`).
+
+## Producción (servidor)
+
+`docker-compose.prod.yml` corre MySQL, backend, broker y frontend en un servidor.
+
+1. **Servidor** con Docker y los repositorios clonados como en "Requisitos". Un **dominio** para la
+   web/API y otro (o el mismo) para el broker, p. ej. `mqtt.example.com`.
+2. **Certificado del broker** de Let's Encrypt (`certbot certonly --standalone -d mqtt.example.com`).
+   Copia `fullchain.pem` como `server.crt` y `privkey.pem` como `server.key` en `MQTT_CERT_DIR`
+   (legibles por uid 1000) y repítelo en cada renovación con un `--deploy-hook` que reinicie
+   `mosquitto`. El firmware no cambia: confía en las raíces de Let's Encrypt.
+3. **Claves JWT** en `JWT_KEYS_DIR` (`openssl genpkey` como en `prepare.sh`), legibles por
+   `BACKEND_UID` (10001 por defecto).
+4. **Configuración**: `cp .env.prod.example .env.prod` y rellénalo (contraseñas, pepper,
+   `MQTT_BACKEND_PASS` aleatorio, `DEVICE_MQTT_PUBLIC_HOST` = dominio del broker, origen público de
+   la web, correo, Google, VAPID).
+5. **Arranque**: `docker compose -f docker-compose.prod.yml --env-file .env.prod up -d --build`
+6. **Proxy HTTPS** (Caddy/nginx) que reenvía **todo** el dominio a `127.0.0.1:${WEB_PORT}` (8081):
+   el nginx del frontend sirve la web y pasa solo `/api/` al backend, así que `/internal/**` nunca
+   queda expuesto. La web debe servirse por HTTPS (Web Bluetooth y push lo exigen).
+7. **Firewall**: abre 443 (proxy) y 8883 (MQTT TLS). 1883, 3306, 8080 y 8081 quedan cerrados.
+
+Varias instancias del backend necesitan `MQTT_CLIENT_ID` distintos.
+
+Claves VAPID para push en el navegador (una vez por entorno; cambiarlas invalida las suscripciones):
+
+```bash
+openssl ecparam -name prime256v1 -genkey -noout -out vapid.pem
+echo "NOTIFICATION_VAPID_PRIVATE_KEY=$(openssl ec -in vapid.pem -outform DER | tail -c +8 | head -c 32 | base64 -w0 | tr '+/' '-_' | tr -d '=')"
+echo "NOTIFICATION_VAPID_PUBLIC_KEY=$(openssl ec -in vapid.pem -pubout -outform DER | tail -c 65 | base64 -w0 | tr '+/' '-_' | tr -d '=')"
+rm vapid.pem
+```
+
 ## Integración MQTT (ya hecha en el código)
 
-El código del backend ya trae la integración; esta pila solo conecta las piezas:
+El código del backend ya trae la integración; infra solo conecta las piezas:
 
 - El backend publica/consume telemetría y estado como un cliente MQTT más
   (`MQTT_BROKER_URL=tcp://mosquitto:1883`, listener interno sin TLS).
 - El broker **no guarda usuarios**: por cada conexión pregunta al backend
   (`POST /internal/mqtt/auth/user`) y por cada publicación (`/acl`), cacheado 5 min.
-  Por eso `mosquitto.conf` apunta a `auth_opt_http_host backend`, que aquí es el
-  servicio `backend` de la red Docker.
+  Por eso `mosquitto.conf` apunta a `auth_opt_http_host backend`: en la pila completa y en
+  producción es el contenedor `backend`; en modo desarrollo, el host (`host-gateway`).
 - Los dispositivos ESP32 se conectan por **8883 TLS** con su `device_code`/`api_key`
-  (guardada como hash SHA-256). Los certificados de desarrollo salen de
-  `../devices/docker/mosquitto/generate-dev-certs.sh` (los genera `prepare.sh`).
+  (guardada como hash SHA-256). En local, el certificado es de la CA de desarrollo que crea
+  `prepare.sh`; en producción, de Let's Encrypt.
 - `DEVICE_MQTT_PUBLIC_HOST` es la IP de LAN que la web escribe al módulo al vincularlo
-  por Bluetooth; debe ser alcanzable desde la Wi-Fi del hogar (nunca `localhost`).
-
-El `mosquitto.conf` es **el mismo** que usa producción
-(`devices/docker/mosquitto/mosquitto.conf`); lo único que cambia es qué resuelve el
-nombre `backend` (aquí, el contenedor; en dev con backend en el host, `host-gateway`).
+  por Bluetooth; debe ser alcanzable desde la Wi-Fi del hogar (nunca `localhost`), y
+  `prepare.sh` la incluye siempre en el certificado.
 
 ## Puertos publicados
 
@@ -98,7 +193,7 @@ nombre `backend` (aquí, el contenedor; en dev con backend en el host, `host-gat
 | 8080 | backend | REST `/api/v1` (abierto para depurar). |
 | 8883 | mosquitto | MQTT sobre TLS, para los dispositivos. |
 | 1883 | mosquitto | MQTT sin TLS, solo en `127.0.0.1`, para el backend. |
-| 3306 | mysql | Base de datos (abierto para depurar). |
+| 3306 | mysql | Base de datos, solo en `127.0.0.1` (para depurar desde este PC). |
 
 ## Comandos útiles
 
@@ -106,7 +201,7 @@ nombre `backend` (aquí, el contenedor; en dev con backend en el host, `host-gat
 docker compose logs -f backend        # ver el arranque del backend
 docker compose ps                     # estado de los contenedores
 docker compose down                   # parar (conserva los volúmenes)
-docker compose down -v                # parar y borrar también datos y certificados
+docker compose down -v                # parar y borrar también los datos (MySQL y broker); claves y certificados quedan en disco
 docker compose up -d --build backend  # reconstruir solo el backend
 ```
 
@@ -142,13 +237,29 @@ o las credenciales del backend con ACL de publicación; el broker **no** acepta 
 - **El frontend repite `401` en `/api/v1/homes`:** es lo esperado sin sesión; inicia sesión
   (registro o Google) y el error desaparece.
 
+- **El dispositivo no conecta: `[TLS] X509 - Certificate verification failed`** (o el broker
+  registra `tlsv1 alert unknown ca`): el certificado del broker no cubre la IP a la que se
+  conecta el módulo, o el firmware se compiló con otra CA. Pon la IP correcta en
+  `DEVICE_MQTT_PUBLIC_HOST`, ejecuta `./prepare.sh` (siempre incluye esa IP en el certificado)
+  y `docker compose up -d --force-recreate mosquitto`. Si persiste, vuelve a flashear el firmware
+  desde este PC: `backend/energy-monitor-backend/firmware/esp32-pzem-monitor/dev_ca.h` debe ser la CA de
+  `infra/mosquitto/certs/ca.crt`.
+
+- **`Access denied for user 'energy_app'` en el backend del PC (modo desarrollo):** su
+  `application-local.yaml` o `SPRING_DATASOURCE_PASSWORD` no coinciden con `MYSQL_PASSWORD` de
+  `infra/.env`.
+
+- **El broker registra `context deadline exceeded` llamando a `backend:8080` (modo desarrollo):**
+  el backend del PC no está corriendo, o falta la regla de `ufw` de "Modo desarrollo".
+
 - **El backend tarda ~2 min en el primer arranque:** Liquibase ejecuta los 50 changesets
   sobre la base nueva. Es normal; espera a `health = UP`.
 
 ## Notas
 
-- **Secretos**: `.env`, `keys/*.pem` y los certificados están en `.gitignore`; no se versionan.
-- **Producción**: en un servidor se usa `devices/docker/docker-compose.prod.yml`
-  (broker + backend + MySQL con TLS de Let's Encrypt y el reverse proxy delante), **no** esta pila.
-- **Certificados**: si cambia la IP de LAN del PC, vuelve a ejecutar `./prepare.sh`
-  (reemite el certificado del broker; la CA se reutiliza).
+- **Secretos**: `.env`, `.env.prod`, `keys/` y `mosquitto/certs/` están en `.gitignore`; no se versionan.
+- **Producción**: en un servidor se usa `docker-compose.prod.yml` (sección "Producción"), no la
+  pila local.
+- **Certificados**: si cambia la IP de LAN del PC, actualiza `DEVICE_MQTT_PUBLIC_HOST` y vuelve a
+  ejecutar `./prepare.sh` (reemite el certificado del broker con las IPs actuales más
+  `DEVICE_MQTT_PUBLIC_HOST`; la CA se reutiliza, así que no hace falta reflashear).

@@ -48,7 +48,10 @@ Los `Dockerfile` siguen en su repositorio (`backend/energy-monitor-backend` y
 | `docker-compose.prod.yml` | sí | Servidor |
 | `.env.example` / `.env.prod.example` | sí | Plantillas de `.env` / `.env.prod` |
 | `prepare.sh` | sí | Claves RSA, `.env` y certificado de desarrollo del broker |
-| `make-admin.sh` | sí | Da el rol global `ADMIN` a una cuenta |
+| `make-admin.sh` | sí | Da el rol global `ADMIN` a una cuenta (`--prod` en el servidor) |
+| `deploy/nginx-energy-monitor.conf` | sí | Sitio de Nginx del servidor (proxy HTTPS) |
+| `deploy/renew-mqtt-cert.sh` | sí | Hook de Certbot: copia el certificado del broker y reinicia `mosquitto` |
+| `deploy/backup-mysql.sh` | sí | Respaldo lógico diario de MySQL en el servidor |
 | `mosquitto/mosquitto.conf` | sí | Configuración del broker (la misma en los tres modos) |
 | `mosquitto/generate-dev-certs.sh` | sí | CA y certificado de desarrollo (lo llama `prepare.sh`) |
 | `mosquitto/certs/` | **no** | CA, certificado y claves privadas del broker |
@@ -138,26 +141,31 @@ cd ../backend/energy-monitor-backend && ./mvnw spring-boot:run
 
 ## Producción (servidor)
 
-`docker-compose.prod.yml` corre MySQL, backend, broker y frontend en un servidor.
+`docker-compose.prod.yml` corre MySQL, backend, broker y frontend en un servidor (VPS Ubuntu con
+Docker, Nginx y Certbot). El procedimiento completo, con verificación y reversión, está en el
+manual de despliegue (`energy-monitor-docs-final/17-despliegue`). En resumen:
 
-1. **Servidor** con Docker y los repositorios clonados como en "Requisitos". Un **dominio** para la
-   web/API y otro (o el mismo) para el broker, p. ej. `mqtt.example.com`.
-2. **Certificado del broker** de Let's Encrypt (`certbot certonly --standalone -d mqtt.example.com`).
-   Copia `fullchain.pem` como `server.crt` y `privkey.pem` como `server.key` en `MQTT_CERT_DIR`
-   (legibles por uid 1000) y repítelo en cada renovación con un `--deploy-hook` que reinicie
-   `mosquitto`. El firmware no cambia: confía en las raíces de Let's Encrypt.
-3. **Claves JWT** en `JWT_KEYS_DIR` (`openssl genpkey` como en `prepare.sh`), legibles por
-   `BACKEND_UID` (10001 por defecto).
-4. **Configuración**: `cp .env.prod.example .env.prod` y rellénalo (contraseñas, pepper,
-   `MQTT_BACKEND_PASS` aleatorio, `DEVICE_MQTT_PUBLIC_HOST` = dominio del broker, origen público de
-   la web, correo, Google, VAPID).
-5. **Arranque**: `docker compose -f docker-compose.prod.yml --env-file .env.prod up -d --build`
-6. **Proxy HTTPS** (Caddy/nginx) que reenvía **todo** el dominio a `127.0.0.1:${WEB_PORT}` (8081):
-   el nginx del frontend sirve la web y pasa solo `/api/` al backend, así que `/internal/**` nunca
-   queda expuesto. La web debe servirse por HTTPS (Web Bluetooth y push lo exigen).
-7. **Firewall**: abre 443 (proxy) y 8883 (MQTT TLS). 1883, 3306, 8080 y 8081 quedan cerrados.
+1. **DNS**: registros A de `DOMINIO`, `www.DOMINIO` y `mqtt.DOMINIO` hacia la IP del VPS.
+2. **Servidor**: Docker, Nginx y Certbot; firewall con 22, 80, 443 y 8883 abiertos.
+3. **Código** en `/opt/energy-monitor` (`infra`, `backend/energy-monitor-backend`,
+   `frontend/energy-monitor-web`), como en "Requisitos".
+4. **Claves JWT** en `JWT_KEYS_DIR` (`/opt/energy-monitor/keys`), legibles por `BACKEND_UID` (10001).
+5. **Nginx y certificados**: `deploy/nginx-energy-monitor.conf` (sitio que reenvía todo el dominio a
+   `127.0.0.1:${WEB_PORT}`, por defecto 8081) y Certbot. El del broker va aparte
+   (`certbot certonly --nginx -d mqtt.DOMINIO`) y `deploy/renew-mqtt-cert.sh`, instalado como hook
+   de renovación, lo copia a `MQTT_CERT_DIR` y reinicia `mosquitto`. El firmware no cambia: confía
+   en las raíces de Let's Encrypt.
+6. **Configuración**: `cp .env.prod.example .env.prod` y rellénalo (contraseñas, pepper,
+   `MQTT_BACKEND_PASS`, `DEVICE_MQTT_PUBLIC_HOST=mqtt.DOMINIO`, `https://DOMINIO` como origen y URL
+   pública, correo, Google, VAPID, Expo). `chmod 600 .env.prod`.
+7. **Arranque**: `docker compose -f docker-compose.prod.yml --env-file .env.prod up -d --build`
+8. **Primer administrador**: registra la cuenta en la web y `./make-admin.sh --prod correo@ejemplo.com`.
+9. **Respaldo diario**: `deploy/backup-mysql.sh` en el cron de root.
 
-Varias instancias del backend necesitan `MQTT_CLIENT_ID` distintos.
+El nginx del frontend solo pasa `/api/` al backend, así que `/internal/**` nunca queda expuesto, y
+el backend corre con `SERVER_FORWARD_HEADERS_STRATEGY=native` para ver la IP real del cliente.
+1883, 3306, 8080 y 8081 no se abren en el firewall. Varias instancias del backend necesitan
+`MQTT_CLIENT_ID` distintos.
 
 Claves VAPID para push en el navegador (una vez por entorno; cambiarlas invalida las suscripciones):
 

@@ -50,6 +50,10 @@ services:
     environment:
       # Cualquier perfil distinto de "local" (el de application-local.yaml).
       SPRING_PROFILES_ACTIVE: prod
+      # Detras de dos proxies (Nginx del host y el del frontend): Tomcat toma la IP real del
+      # cliente de X-Forwarded-For, confiando solo en proxies de redes privadas. Sin esto el
+      # limite de intentos de recuperacion seria uno solo para todos los usuarios.
+      SERVER_FORWARD_HEADERS_STRATEGY: native
       SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/energy_monitor?connectionTimeZone=UTC&forceConnectionTimeZoneToSession=true
       SPRING_DATASOURCE_USERNAME: energy_app
       SPRING_DATASOURCE_PASSWORD: ${MYSQL_PASSWORD}

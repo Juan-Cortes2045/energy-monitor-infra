@@ -8,13 +8,20 @@
 # desde la web: registro con correo o "Iniciar sesion con Google"). No crea cuentas.
 #
 # Lee la contrasena de root de MySQL desde infra/.env (MYSQL_ROOT_PASSWORD).
-# Es idempotente: si la cuenta ya es ADMIN no falla ni duplica.
+# Es idempotente: si la cuenta ya es ADMIN no falla ni duplica, y si el rol se le
+# habia revocado desde la web (fila con deleted_at) lo reactiva.
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
-email="${1:-}"
+# El backend guarda los correos sin espacios y en minusculas.
+email="$(printf '%s' "${1:-}" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')"
 if [[ -z "$email" ]]; then
   echo "Uso: ./make-admin.sh correo@ejemplo.com" >&2
+  exit 2
+fi
+# El correo va dentro del SQL: solo se aceptan los caracteres de una direccion normal.
+if [[ ! "$email" =~ ^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]+$ ]]; then
+  echo "Correo no valido: '$email'" >&2
   exit 2
 fi
 
@@ -33,20 +40,25 @@ if [[ "$exists" = "0" ]]; then
   exit 1
 fi
 
+# Revocar el rol desde la web marca deleted_at en lugar de borrar la fila, asi que un
+# INSERT IGNORE no lo devolveria: el duplicado se reactiva con ON DUPLICATE KEY.
 run_sql -e "
-INSERT IGNORE INTO user_system_role (user_id, system_role_id, assigned_at)
+INSERT INTO user_system_role (user_id, system_role_id, assigned_at)
 SELECT u.id_user, sr.id_system_role, NOW()
 FROM user u
 JOIN system_role sr ON sr.name = 'ADMIN' AND sr.deleted_at IS NULL
-WHERE u.email = '$email' AND u.deleted_at IS NULL;"
+WHERE u.email = '$email' AND u.deleted_at IS NULL
+ON DUPLICATE KEY UPDATE
+  assigned_at = IF(user_system_role.deleted_at IS NULL, user_system_role.assigned_at, NOW()),
+  deleted_at = NULL;"
 
-echo "Roles de '$email' ahora:"
+echo "Roles activos de '$email':"
 run_sql -e "
 SELECT u.email, sr.name AS rol
 FROM user_system_role usr
 JOIN user u ON u.id_user = usr.user_id
 JOIN system_role sr ON sr.id_system_role = usr.system_role_id
-WHERE u.email = '$email';"
+WHERE u.email = '$email' AND usr.deleted_at IS NULL AND sr.deleted_at IS NULL;"
 
 echo
 echo "Cierra sesion y vuelve a entrar en la web para ver la pantalla de Administracion."

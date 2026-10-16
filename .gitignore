@@ -1,6 +1,7 @@
 .env
 .env.*
 !.env.example
+!.env.prod.example
 keys/*.pem
 keys/*
 !keys/.gitkeep

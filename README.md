@@ -52,6 +52,8 @@ Los `Dockerfile` siguen en su repositorio (`backend/energy-monitor-backend` y
 | `deploy/nginx-energy-monitor.conf` | sí | Sitio de Nginx del servidor (proxy HTTPS) |
 | `deploy/renew-mqtt-cert.sh` | sí | Hook de Certbot: copia el certificado del broker y reinicia `mosquitto` |
 | `deploy/backup-mysql.sh` | sí | Respaldo lógico diario de MySQL en el servidor |
+| `deploy/deploy.sh` | sí | Despliegue de un componente en el servidor (lo llama GitHub Actions) |
+| `.github/workflows/ci-cd.yml` | sí | Validación de las compose y scripts, y despliegue de infra |
 | `mosquitto/mosquitto.conf` | sí | Configuración del broker (la misma en los tres modos) |
 | `mosquitto/generate-dev-certs.sh` | sí | CA y certificado de desarrollo (lo llama `prepare.sh`) |
 | `mosquitto/certs/` | **no** | CA, certificado y claves privadas del broker |
@@ -175,6 +177,24 @@ echo "NOTIFICATION_VAPID_PRIVATE_KEY=$(openssl ec -in vapid.pem -outform DER | t
 echo "NOTIFICATION_VAPID_PUBLIC_KEY=$(openssl ec -in vapid.pem -pubout -outform DER | tail -c 65 | base64 -w0 | tr '+/' '-_' | tr -d '=')"
 rm vapid.pem
 ```
+
+## CI/CD con GitHub Actions
+
+Cada repositorio (backend, web e infra) tiene `.github/workflows/ci-cd.yml`:
+
+- **CI** en cada PR y push a `dev`/`main`: backend `./mvnw test` contra MySQL 8.4 (servicio del
+  runner), web `vitest` + `npm run build`, infra `docker compose config` de los tres modos,
+  `shellcheck` y `nginx -t` de la plantilla.
+- **CD** solo desde `main` (push o *Run workflow*), después de los tests y de la aprobación del
+  environment `production`: entra por SSH al VPS y ejecuta `deploy/deploy.sh backend|frontend|infra`.
+  El script respalda MySQL, hace `git pull` de `main`, reconstruye solo ese servicio y espera
+  `actuator/health`; si falla, vuelve a la versión anterior y el job queda en rojo.
+
+La llave SSH de GitHub está restringida en `authorized_keys` a `deploy.sh`
+(`command="/opt/energy-monitor/infra/deploy/deploy.sh",no-pty,...`): no abre una consola ni
+ejecuta otra cosa. Secretos del environment `production` en cada repositorio: `DEPLOY_HOST`,
+`DEPLOY_USER`, `DEPLOY_SSH_KEY` y `DEPLOY_KNOWN_HOSTS`. Configuración paso a paso: manual de
+despliegue, sección 8.5.
 
 ## Integración MQTT (ya hecha en el código)
 

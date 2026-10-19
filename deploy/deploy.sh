@@ -50,7 +50,9 @@ healthy() {
 
 apply() {
   if [[ -n "$service" ]]; then
-    "${compose[@]}" up -d --build "$service"
+    # --no-deps: el frontend depende del backend en la compose; sin esto, desplegar uno
+    # reconstruiria tambien el otro con lo que tenga su clon en ese momento.
+    "${compose[@]}" up -d --build --no-deps "$service"
   else
     # Cambios de infra (compose, mosquitto.conf): recrea lo que cambio de configuracion.
     "${compose[@]}" up -d --remove-orphans

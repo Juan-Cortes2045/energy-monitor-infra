@@ -136,7 +136,7 @@ cd ../backend/energy-monitor-backend && ./mvnw spring-boot:run
   En Linux con `ufw` permite solo las redes de Docker, una vez:
 
   ```bash
-  sudo ufw allow from 172.16.0.0/12 to any port 8080 proto tcp comment 'mosquitto -> backend'
+  sudo ufw allow from 172.16.0.0/12 to any port 8083 proto tcp comment 'mosquitto -> backend'
   ```
 
 - Para volver a la pila completa: `docker compose up -d` (recrea el broker sin `host-gateway`).
@@ -277,8 +277,9 @@ o las credenciales del backend con ACL de publicación; el broker **no** acepta 
   `application-local.yaml` o `SPRING_DATASOURCE_PASSWORD` no coinciden con `MYSQL_PASSWORD` de
   `infra/.env`.
 
-- **El broker registra `context deadline exceeded` llamando a `backend:8080` (modo desarrollo):**
-  el backend del PC no está corriendo, o falta la regla de `ufw` de "Modo desarrollo".
+- **El broker registra `context deadline exceeded` llamando a `backend:8083` (modo desarrollo):**
+  el backend del PC no está corriendo, o falta la regla de `ufw` de "Modo desarrollo" (con el
+  puerto 8083: la de 8080 de antes ya no sirve).
 
 - **El backend tarda ~2 min en el primer arranque:** Liquibase ejecuta los 50 changesets
   sobre la base nueva. Es normal; espera a `health = UP`.

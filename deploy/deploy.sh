@@ -2,11 +2,11 @@
 # =============================================================================
 # EnergyMonitor - Despliegue de un componente en el servidor (lo llama GitHub Actions)
 # =============================================================================
-# Uso:   deploy.sh backend|frontend|infra
+# Uso:   deploy.sh backend|security|gateway|frontend|infra
 #
 # GitHub Actions entra por SSH con una llave restringida en authorized_keys a este script:
 #   command="/opt/energy-monitor/infra/deploy/deploy.sh",no-port-forwarding,no-agent-forwarding,no-X11-forwarding,no-pty ssh-ed25519 AAAA... github-actions
-# El argumento llega en SSH_ORIGINAL_COMMAND y solo se aceptan los tres nombres de arriba:
+# El argumento llega en SSH_ORIGINAL_COMMAND y solo se aceptan los cinco nombres de arriba:
 # esa llave no sirve para abrir una consola ni para ejecutar otra cosa.
 #
 # Pasos: respaldo de MySQL, git pull de DEPLOY_BRANCH (main) en el repositorio del
@@ -21,10 +21,12 @@ HEALTH_TIMEOUT_S="${HEALTH_TIMEOUT_S:-300}"
 # Con la llave restringida el argumento llega en SSH_ORIGINAL_COMMAND; a mano, como $1.
 target="${1:-${SSH_ORIGINAL_COMMAND:-}}"
 case "$target" in
-  backend)  repo="$EM/backend/energy-monitor-backend"; service=backend ;;
-  frontend) repo="$EM/frontend/energy-monitor-web";    service=frontend ;;
-  infra)    repo="$EM/infra";                          service="" ;;
-  *) echo "Uso: deploy.sh backend|frontend|infra (recibido: '$target')" >&2; exit 2 ;;
+  backend)  repo="$EM/backend/energy-monitor-backend";      service=backend ;;
+  security) repo="$EM/backend/en-monitor-security-service"; service=security ;;
+  gateway)  repo="$EM/backend/en-monitor-api-gateway";      service=gateway ;;
+  frontend) repo="$EM/frontend/energy-monitor-web";         service=frontend ;;
+  infra)    repo="$EM/infra";                               service="" ;;
+  *) echo "Uso: deploy.sh backend|security|gateway|frontend|infra (recibido: '$target')" >&2; exit 2 ;;
 esac
 
 compose=(docker compose --project-directory "$EM/infra" -f "$EM/infra/docker-compose.prod.yml"
@@ -36,11 +38,21 @@ flock -w 900 9 || { echo "Otro despliegue sigue en curso" >&2; exit 1; }
 
 log() { printf '[deploy %s] %s\n' "$(date -u +%H:%M:%S)" "$*"; }
 
+# Los servicios Java no publican puertos: su salud es la del healthcheck de su contenedor
+# (/actuator/health dentro de la red de Docker).
+container_healthy() {
+  local id
+  id="$("${compose[@]}" ps -q "$1")"
+  [[ -n "$id" && "$(docker inspect -f '{{.State.Health.Status}}' "$id" 2>/dev/null)" == healthy ]]
+}
+
 healthy() {
   local deadline=$((SECONDS + HEALTH_TIMEOUT_S))
   while ((SECONDS < deadline)); do
-    if curl -fsS http://127.0.0.1:8080/actuator/health 2>/dev/null | grep -q '"status":"UP"' &&
-       [[ "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8081/)" == 200 ]]; then
+    if container_healthy security && container_healthy backend && container_healthy gateway &&
+       [[ "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8081/)" == 200 ]] &&
+       # La API de punta a punta: nginx del frontend -> gateway, que pide token.
+       [[ "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8081/api/v1/homes)" == 401 ]]; then
       return 0
     fi
     sleep 5
@@ -50,11 +62,12 @@ healthy() {
 
 apply() {
   if [[ -n "$service" ]]; then
-    # --no-deps: el frontend depende del backend en la compose; sin esto, desplegar uno
-    # reconstruiria tambien el otro con lo que tenga su clon en ese momento.
+    # --no-deps: el frontend depende del gateway, y este de los dos servicios; sin esto, desplegar
+    # uno reconstruiria tambien los otros con lo que tenga su clon en ese momento.
     "${compose[@]}" up -d --build --no-deps "$service"
   else
-    # Cambios de infra (compose, mosquitto.conf): recrea lo que cambio de configuracion.
+    # Cambios de infra (compose, mosquitto.conf): recrea lo que cambio de configuracion y crea
+    # (o construye) los servicios nuevos.
     "${compose[@]}" up -d --remove-orphans
     "${compose[@]}" up -d --force-recreate mosquitto
   fi
@@ -83,7 +96,11 @@ if healthy; then
 fi
 
 log "FALLO la prueba de salud: volviendo a ${before:0:7}"
-"${compose[@]}" logs --tail 80 "${service:-backend}" || true
+if [[ -n "$service" ]]; then
+  "${compose[@]}" logs --tail 80 "$service" || true
+else
+  "${compose[@]}" logs --tail 40 security backend gateway || true
+fi
 git -C "$repo" checkout --quiet "$before"
 apply
 if healthy; then

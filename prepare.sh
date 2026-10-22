@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # =============================================================================
-# EnergyMonitor - Prepara la pila local: claves RSA del backend y certificados
+# EnergyMonitor - Prepara la pila local: claves RSA de los JWT y certificados
 # de desarrollo del broker Mosquitto.
 # =============================================================================
 # Uso:  ./prepare.sh
 #
 # Crea:
-#   infra/keys/private.pem, public.pem   par RSA de los JWT del backend
+#   infra/keys/private.pem, public.pem   par RSA de los JWT (firma el servicio de seguridad)
 #   infra/mosquitto/certs/*              CA y certificado de desarrollo del broker
 #   backend/energy-monitor-backend/firmware/esp32-pzem-monitor/dev_ca.h  (lo escribe el script
 #                                        de certificados; CA que embebe el firmware)
@@ -41,8 +41,8 @@ if [[ ! -f "$here/.env" ]]; then
   fi
 fi
 
-# El backend corre con el uid/gid de BACKEND_UID/BACKEND_GID. Como las claves las
-# genera tu usuario, apuntamos esos valores a tu uid/gid para que pueda leerlas.
+# El servicio de seguridad (el unico que lee private.pem) corre con el uid/gid de
+# BACKEND_UID/BACKEND_GID. Como las claves las genera tu usuario, apuntamos esos valores a tu uid/gid para que pueda leerlas.
 if [[ -f "$here/.env" ]]; then
   uid="$(id -u)"; gid="$(id -g)"
   set_env() {
@@ -76,5 +76,5 @@ echo "Generando los certificados de desarrollo del broker ..."
 
 echo
 echo "Listo. Siguientes pasos:"
-echo "  1. Revisa $here/.env (contrasenas, pepper, DEVICE_MQTT_PUBLIC_HOST)."
+echo "  1. Revisa $here/.env (contrasenas, pepper, RABBITMQ_PASSWORD, INTERNAL_API_TOKEN, DEVICE_MQTT_PUBLIC_HOST)."
 echo "  2. cd $here && docker compose up -d --build"

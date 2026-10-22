@@ -12,7 +12,7 @@
 #
 # El backend corre en el host, asi que "backend" (el que autentica a cada cliente MQTT)
 # apunta al host con host-gateway. En Linux con ufw hace falta permitir la red de Docker:
-#   sudo ufw allow from 172.16.0.0/12 to any port 8080 proto tcp comment 'mosquitto -> backend'
+#   sudo ufw allow from 172.16.0.0/12 to any port 8083 proto tcp comment 'mosquitto -> backend'
 
 services:
   mosquitto:

@@ -1,5 +1,5 @@
 # =============================================================================
-# EnergyMonitor - Pila completa LOCAL (base de datos + MQTT + backend + frontend)
+# EnergyMonitor - Pila completa LOCAL (base de datos, mensajeria, MQTT, servicios y frontend)
 # =============================================================================
 # Levanta todo el sistema en contenedores sobre Docker, sin depender de un servidor:
 #
@@ -9,11 +9,17 @@
 #   docker compose up -d --build
 #
 # Servicios y puertos publicados:
-#   80    frontend (nginx): sirve la web y reenvia /api/ al backend (mismo origen, sin CORS)
-#   8080  backend (REST /api/v1)   [tambien abierto por comodidad de depuracion]
+#   80    frontend (nginx): sirve la web y reenvia /api/ al API gateway (mismo origen, sin CORS).
+#         La app movil en la LAN usa esta misma direccion: http://<IP de LAN>
 #   8883  MQTT sobre TLS, para los dispositivos ESP32
-#   1883  MQTT sin TLS, solo en 127.0.0.1, para el backend
+#   1883  MQTT sin TLS, solo en 127.0.0.1
 #   3306  MySQL, solo en 127.0.0.1 [para depurar desde este PC]
+#   5672  RabbitMQ (AMQP), solo en 127.0.0.1; 15672 su consola web, solo en 127.0.0.1
+#
+# El gateway es la unica entrada de la API: reenvia /api/v1/auth/** y /api/v1/admin/users|roles/**
+# al servicio de seguridad (8082) y el resto de /api/v1/** a energy-monitor-backend (8083). Ni esos
+# dos ni el gateway publican puertos: solo se alcanzan por la red de Docker, asi que /internal/**
+# nunca queda expuesto.
 #
 # La integracion MQTT ya esta hecha en el codigo: el broker delega la autenticacion de
 # cada dispositivo en el backend (POST /internal/mqtt/auth/user y /acl). Aqui solo se
@@ -22,7 +28,7 @@
 # de abajo.
 #
 # Otros modos (ver README):
-#   docker-compose.dev.yml   solo MySQL + broker; el backend corre en este PC (./mvnw)
+#   docker-compose.dev.yml   solo MySQL, RabbitMQ y el broker; los servicios corren en este PC (./mvnw)
 #   docker-compose.prod.yml  despliegue en un servidor (Let's Encrypt, proxy HTTPS delante)
 
 name: energy-monitor
@@ -51,16 +57,83 @@ services:
       retries: 10
     restart: unless-stopped
 
-  backend:
+  # Cola de los eventos de cuenta y de los pedidos de correo entre el servicio de seguridad y el
+  # backend (outbox). El nombre de host fijo importa: RabbitMQ guarda sus datos por nodo, y con el
+  # nombre aleatorio de cada contenedor el volumen quedaria huerfano al recrearlo.
+  rabbitmq:
+    image: rabbitmq:4.1-management
+    container_name: energy-monitor-rabbitmq
+    hostname: rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USERNAME:-energy-monitor}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:?RABBITMQ_PASSWORD is required}
+    ports:
+      # Solo loopback: los servicios en este PC (modo desarrollo) y la consola web.
+      - "127.0.0.1:5672:5672"
+      - "127.0.0.1:15672:15672"
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+    restart: unless-stopped
+
+  # Cuentas, sesiones, roles y permisos. Firma los tokens con private.pem.
+  security:
     build:
-      context: ${BACKEND_CONTEXT:-../backend/energy-monitor-backend}
-    image: energy-monitor-backend:local
-    container_name: energy-monitor-backend
+      context: ${SECURITY_CONTEXT:-../backend/en-monitor-security-service}
+    image: energy-monitor-security:local
+    container_name: energy-monitor-security
     # La imagen corre como uid 10001; BACKEND_UID/GID deben ser el dueño de ./keys
     # para que el proceso pueda leer private.pem (ver README).
     user: "${BACKEND_UID:-10001}:${BACKEND_GID:-10001}"
     depends_on:
       mysql:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    environment:
+      # Cualquier perfil distinto de "local" (el de application-local.yaml).
+      SPRING_PROFILES_ACTIVE: prod
+      # La misma base que el backend: cada uno con sus tablas y sus changesets.
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/energy_monitor?connectionTimeZone=UTC&forceConnectionTimeZoneToSession=true
+      SPRING_DATASOURCE_USERNAME: energy_app
+      SPRING_DATASOURCE_PASSWORD: ${MYSQL_PASSWORD:?MYSQL_PASSWORD is required}
+      SECURITY_JWT_PRIVATE_KEY_PATH: /run/keys/private.pem
+      SECURITY_JWT_PUBLIC_KEY_PATH: /run/keys/public.pem
+      SECURITY_RESET_PEPPER: ${SECURITY_RESET_PEPPER:?SECURITY_RESET_PEPPER is required}
+      # Mismo cliente OAuth que el frontend (VITE_GOOGLE_CLIENT_ID). El servicio canjea el
+      # codigo de Google, asi que necesita el secreto, que nunca llega al navegador.
+      # Vacio en ambos = boton de Google desactivado (503).
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_USERNAME: ${RABBITMQ_USERNAME:-energy-monitor}
+      RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:?RABBITMQ_PASSWORD is required}
+      INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:?INTERNAL_API_TOKEN is required}
+      BACKEND_INTERNAL_URL: http://backend:8083
+    volumes:
+      - ./keys:/run/keys:ro
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8082/actuator/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 120s
+    stop_grace_period: 30s
+    restart: unless-stopped
+
+  backend:
+    build:
+      context: ${BACKEND_CONTEXT:-../backend/energy-monitor-backend}
+    image: energy-monitor-backend:local
+    container_name: energy-monitor-backend
+    depends_on:
+      mysql:
+        condition: service_healthy
+      rabbitmq:
         condition: service_healthy
     environment:
       # Cualquier perfil distinto de "local" (el de application-local.yaml).
@@ -68,20 +141,18 @@ services:
       SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/energy_monitor?connectionTimeZone=UTC&forceConnectionTimeZoneToSession=true
       SPRING_DATASOURCE_USERNAME: energy_app
       SPRING_DATASOURCE_PASSWORD: ${MYSQL_PASSWORD:?MYSQL_PASSWORD is required}
-      SECURITY_JWT_PRIVATE_KEY_PATH: /run/keys/private.pem
+      # Solo valida los tokens: recibe la clave publica, nunca la privada.
       SECURITY_JWT_PUBLIC_KEY_PATH: /run/keys/public.pem
-      SECURITY_RESET_PEPPER: ${SECURITY_RESET_PEPPER:?SECURITY_RESET_PEPPER is required}
-      SECURITY_CORS_ALLOWED_ORIGINS: ${SECURITY_CORS_ALLOWED_ORIGINS:-http://localhost}
+      SECURITY_SERVICE_URL: http://security:8082
+      INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:?INTERNAL_API_TOKEN is required}
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_USERNAME: ${RABBITMQ_USERNAME:-energy-monitor}
+      RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:?RABBITMQ_PASSWORD is required}
       MAIL_HOST: ${MAIL_HOST:-}
       MAIL_PORT: ${MAIL_PORT:-587}
       MAIL_USERNAME: ${MAIL_USERNAME:-}
       MAIL_PASSWORD: ${MAIL_PASSWORD:-}
       MAIL_FROM: ${MAIL_FROM:-}
-      # Mismo cliente OAuth que el frontend (VITE_GOOGLE_CLIENT_ID). El backend canjea el
-      # codigo de Google, asi que necesita el secreto, que nunca llega al navegador.
-      # Vacio en ambos = boton de Google desactivado (503).
-      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
-      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
       # El backend habla con el broker por el listener interno (1883) de la misma red.
       MQTT_BROKER_URL: tcp://mosquitto:1883
       MQTT_BACKEND_USER: ${MQTT_BACKEND_USER:-em-backend}
@@ -99,11 +170,44 @@ services:
       # Push a las apps moviles por el relay de Expo. Vacio = push movil desactivado.
       EXPO_ACCESS_TOKEN: ${EXPO_ACCESS_TOKEN:-}
     volumes:
-      - ./keys:/run/keys:ro
-    ports:
-      - "8080:8080"
+      - ./keys/public.pem:/run/keys/public.pem:ro
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8083/actuator/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 120s
     # Al parar, el backend se desuscribe del broker y cierra las peticiones en curso; con los
     # 10 s por defecto Docker lo mataba a mitad (exit 137).
+    stop_grace_period: 30s
+    restart: unless-stopped
+
+  # Unica entrada de la API: CORS, token, limite de intentos y reparto entre los dos servicios.
+  gateway:
+    build:
+      context: ${GATEWAY_CONTEXT:-../backend/en-monitor-api-gateway}
+    image: energy-monitor-gateway:local
+    container_name: energy-monitor-gateway
+    depends_on:
+      security:
+        condition: service_started
+      backend:
+        condition: service_started
+    environment:
+      SECURITY_JWT_PUBLIC_KEY_PATH: /run/keys/public.pem
+      # Con el nginx del frontend delante la web es del mismo origen; solo hace falta para otro
+      # origen (p. ej. el servidor de desarrollo de Vite).
+      SECURITY_CORS_ALLOWED_ORIGINS: ${SECURITY_CORS_ALLOWED_ORIGINS:-http://localhost}
+      SECURITY_SERVICE_URL: http://security:8082
+      BACKEND_URL: http://backend:8083
+    volumes:
+      - ./keys/public.pem:/run/keys/public.pem:ro
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/actuator/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 60s
     stop_grace_period: 30s
     restart: unless-stopped
 
@@ -142,17 +246,18 @@ services:
     build:
       context: ${FRONTEND_CONTEXT:-../frontend/energy-monitor-web}
       args:
-        # Vacío = rutas relativas; nginx reenvía /api/ al backend (sin CORS).
+        # Vacío = rutas relativas; nginx reenvía /api/ al gateway (sin CORS).
         VITE_API_BASE_URL: ""
         VITE_GOOGLE_CLIENT_ID: ${VITE_GOOGLE_CLIENT_ID:-}
     image: energy-monitor-frontend:local
     container_name: energy-monitor-frontend
     depends_on:
-      - backend
+      - gateway
     ports:
       - "80:80"
     restart: unless-stopped
 
 volumes:
   mysql-data:
+  rabbitmq-data:
   mosquitto-data:

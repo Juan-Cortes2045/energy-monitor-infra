@@ -1,18 +1,23 @@
 # =============================================================================
-# EnergyMonitor - Modo desarrollo: MySQL y broker en Docker, backend en este PC
+# EnergyMonitor - Modo desarrollo: MySQL, RabbitMQ y broker en Docker; servicios en este PC
 # =============================================================================
-# Para trabajar el backend desde el IDE o con ./mvnw (spring-boot:run y test):
+# Para trabajar los servicios desde el IDE o con ./mvnw (spring-boot:run y test), cada uno en
+# su terminal:
 #
-#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d mysql mosquitto
-#   cd ../backend/energy-monitor-backend && ./mvnw spring-boot:run
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d mysql rabbitmq mosquitto
+#   cd ../backend/en-monitor-security-service && ./mvnw spring-boot:run    # :8082
+#   cd ../backend/energy-monitor-backend      && ./mvnw spring-boot:run    # :8083
+#   cd ../backend/en-monitor-api-gateway      && ./mvnw spring-boot:run    # :8080
 #
-# Es la misma base y el mismo broker que la pila completa (mismos volumenes y .env),
-# asi que application-local.yaml del backend debe usar MYSQL_PASSWORD de infra/.env.
-# Si la pila completa estaba arriba, primero: docker compose stop backend frontend
+# Es la misma base, la misma cola y el mismo broker que la pila completa (mismos volumenes y
+# .env), asi que el .env y el application-local.yaml de cada servicio deben usar MYSQL_PASSWORD,
+# RABBITMQ_USERNAME/RABBITMQ_PASSWORD e INTERNAL_API_TOKEN de infra/.env.
+# Si la pila completa estaba arriba, primero:
+#   docker compose stop gateway security backend frontend
 #
-# El backend corre en el host, asi que "backend" (el que autentica a cada cliente MQTT)
+# energy-monitor-backend corre en el host, asi que "backend" (el que autentica a cada cliente MQTT)
 # apunta al host con host-gateway. En Linux con ufw hace falta permitir la red de Docker:
-#   sudo ufw allow from 172.16.0.0/12 to any port 8080 proto tcp comment 'mosquitto -> backend'
+#   sudo ufw allow from 172.16.0.0/12 to any port 8083 proto tcp comment 'mosquitto -> backend'
 
 services:
   mosquitto:

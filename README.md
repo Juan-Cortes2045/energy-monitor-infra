@@ -1,27 +1,33 @@
 # infra — EnergyMonitor en Docker
 
-Todo lo de Docker de EnergyMonitor vive aquí: base de datos MySQL, broker MQTT (Mosquitto),
-backend Spring Boot y frontend React, en tres modos:
+Todo lo de Docker de EnergyMonitor vive aquí: base de datos MySQL, cola RabbitMQ, broker MQTT
+(Mosquitto), los tres servicios Spring Boot (API gateway, servicio de seguridad y backend) y el
+frontend React, en tres modos:
 
 | Modo | Archivos | Para qué |
 |---|---|---|
 | Pila completa local | `docker-compose.yml` | Correr todo el sistema en este PC (demo, pruebas de punta a punta) |
-| Desarrollo | `docker-compose.yml` + `docker-compose.dev.yml` | Solo MySQL y broker; el backend corre en el PC con `./mvnw` (IDE, tests) |
+| Desarrollo | `docker-compose.yml` + `docker-compose.dev.yml` | Solo MySQL, RabbitMQ y broker; los servicios corren en el PC con `./mvnw` (IDE, tests) |
 | Producción | `docker-compose.prod.yml` + `.env.prod` | Servidor con dominio, Let's Encrypt y proxy HTTPS delante |
 
-Los `Dockerfile` siguen en su repositorio (`backend/energy-monitor-backend` y
+Los `Dockerfile` siguen en su repositorio (`backend/energy-monitor-backend`,
+`backend/en-monitor-security-service`, `backend/en-monitor-api-gateway` y
 `frontend/energy-monitor-web`): cambian con su código, e infra los construye desde ahí.
 
 ```
-┌──────────────────────────────────────────────────────────────┐
-│                    red Docker: energy-monitor                │
-│                                                              │
-│  frontend :80 ──/api/──► backend :8080 ──► mysql :3306       │
-│                              ▲                               │
-│                              │ /internal/mqtt/auth           │
-│                          mosquitto :1883 / :8883 TLS         │
-└──────────────────────────────────────────────────────────────┘
+red Docker: energy-monitor
+
+  frontend :80 ──/api/──► gateway :8080 ─┬─ /api/v1/auth/**, /api/v1/admin/users|roles/** ─► security :8082
+                                         └─ resto de /api/v1/** ────────────────────────────► backend  :8083
+
+  security :8082 ◄── /internal/** (INTERNAL_API_TOKEN) ──► backend :8083
+  security, backend ──► mysql :3306 (misma base)   y   ──► rabbitmq :5672 (eventos, correo)
+  mosquitto :1883 / :8883 TLS ── /internal/mqtt/auth ──► backend :8083
 ```
+
+Solo se publican la web (`:80`), MQTT TLS (`:8883`) y, en `127.0.0.1`, MySQL, AMQP, la consola de
+RabbitMQ y MQTT sin TLS. El gateway, el servicio de seguridad y el backend solo se alcanzan por la
+red de Docker: `/internal/**` nunca queda expuesto.
 
 ## Requisitos
 
@@ -34,10 +40,12 @@ Los `Dockerfile` siguen en su repositorio (`backend/energy-monitor-backend` y
   mkdir energy-monitor && cd energy-monitor
   git clone https://github.com/Juan-Cortes2045/energy-monitor-infra.git infra
   git clone https://github.com/Juan-Cortes2045/energy-monitor-backend.git backend/energy-monitor-backend
+  git clone https://github.com/Juan-Cortes2045/en-monitor-security-service.git backend/en-monitor-security-service
+  git clone https://github.com/Juan-Cortes2045/en-monitor-api-gateway.git backend/en-monitor-api-gateway
   git clone https://github.com/Juan-Cortes2045/Energy-Monitor-application.git frontend/energy-monitor-web
   ```
 
-  Otras rutas: `BACKEND_CONTEXT` y `FRONTEND_CONTEXT` en `.env`.
+  Otras rutas: `BACKEND_CONTEXT`, `SECURITY_CONTEXT`, `GATEWAY_CONTEXT` y `FRONTEND_CONTEXT` en `.env`.
 
 ## Estructura
 
@@ -57,7 +65,7 @@ Los `Dockerfile` siguen en su repositorio (`backend/energy-monitor-backend` y
 | `mosquitto/mosquitto.conf` | sí | Configuración del broker (la misma en los tres modos) |
 | `mosquitto/generate-dev-certs.sh` | sí | CA y certificado de desarrollo (lo llama `prepare.sh`) |
 | `mosquitto/certs/` | **no** | CA, certificado y claves privadas del broker |
-| `keys/` | **no** | Par RSA de los JWT |
+| `keys/` | **no** | Par RSA de los JWT (privada: solo el servicio de seguridad) |
 | `.env`, `.env.prod` | **no** | Contraseñas y secretos |
 
 `generate-dev-certs.sh` escribe además
@@ -70,15 +78,19 @@ de desarrollo.
 ```bash
 cd infra
 cp .env.example .env      # rellena los valores (o déjalo: prepare.sh lo crea)
-./prepare.sh              # genera la clave RSA del backend y los certificados del broker
-# edita .env: contraseñas, SECURITY_RESET_PEPPER, MQTT_BACKEND_PASS, DEVICE_MQTT_PUBLIC_HOST
-# y (opcional) GOOGLE_CLIENT_ID/GOOGLE_CLIENT_SECRET + VITE_GOOGLE_CLIENT_ID
+./prepare.sh              # genera el par RSA de los JWT y los certificados del broker
+# edita .env: contraseñas, SECURITY_RESET_PEPPER, RABBITMQ_PASSWORD, INTERNAL_API_TOKEN,
+# MQTT_BACKEND_PASS, DEVICE_MQTT_PUBLIC_HOST y (opcional) GOOGLE_CLIENT_ID/GOOGLE_CLIENT_SECRET
+# + VITE_GOOGLE_CLIENT_ID
 docker compose up -d --build
+docker compose ps         # gateway, security y backend deben quedar (healthy)
 ```
 
-Luego abre <http://localhost>. El backend responde en <http://localhost:8080>,
-Swagger en <http://localhost:8080/swagger-ui.html> y `health` en
-<http://localhost:8080/actuator/health>.
+Luego abre <http://localhost>. La API responde en el mismo origen, <http://localhost/api/v1/...>,
+a través del gateway; la app móvil en la LAN usa `http://<IP de LAN>` como
+`EXPO_PUBLIC_API_BASE_URL`. La consola de RabbitMQ está en <http://localhost:15672>
+(`RABBITMQ_USERNAME` / `RABBITMQ_PASSWORD`). Swagger de cada servicio: en modo desarrollo
+(`http://localhost:8082/swagger-ui.html` y `:8083`), porque en la pila completa no publican puertos.
 
 ## Cuentas: registro, primer administrador y Google
 
@@ -96,7 +108,7 @@ Swagger en <http://localhost:8080/swagger-ui.html> y `health` en
   para ver la pantalla de **Administración**, desde donde ese admin ya puede dar `ADMIN` a
   otras cuentas.
 
-- **Iniciar sesión con Google:** el cliente OAuth llega al backend por `GOOGLE_CLIENT_ID`
+- **Iniciar sesión con Google:** el cliente OAuth llega al servicio de seguridad por `GOOGLE_CLIENT_ID`
   y `GOOGLE_CLIENT_SECRET` (`.env`), y al navegador por `VITE_GOOGLE_CLIENT_ID` (build-arg
   del frontend). Si Google responde **`origin_mismatch`**, falta registrar el origen en
   Google Cloud Console → *APIs & Services → Credentials → (tu OAuth client, tipo Web
@@ -108,30 +120,37 @@ Swagger en <http://localhost:8080/swagger-ui.html> y `health` en
 
 | Imagen | Origen | Notas |
 |---|---|---|
-| `energy-monitor-backend:local` | `../backend/energy-monitor-backend/Dockerfile` | Ya existía; multi-stage Maven + JRE 21, corre como uid 10001. |
-| `energy-monitor-frontend:local` | `../frontend/energy-monitor-web/Dockerfile` | **Nuevo**: build con Vite y se sirve con nginx. |
-| `mysql:8.4` | Docker Hub | Base de datos, con volumen `mysql-data`. |
+| `energy-monitor-gateway:local` | `../backend/en-monitor-api-gateway/Dockerfile` | Multi-stage Maven + JRE 21, uid 10001. Solo recibe `public.pem`. |
+| `energy-monitor-security:local` | `../backend/en-monitor-security-service/Dockerfile` | Igual; lee `private.pem`, así que corre como `BACKEND_UID:BACKEND_GID`. |
+| `energy-monitor-backend:local` | `../backend/energy-monitor-backend/Dockerfile` | Igual; solo recibe `public.pem`. |
+| `energy-monitor-frontend:local` | `../frontend/energy-monitor-web/Dockerfile` | Build con Vite y se sirve con nginx. |
+| `mysql:8.4` | Docker Hub | Base de datos compartida por los dos servicios, con volumen `mysql-data`. |
+| `rabbitmq:4.1-management` | Docker Hub | Eventos de cuenta y pedidos de correo (outbox), con volumen `rabbitmq-data`. |
 | `iegomez/mosquitto-go-auth:3.0.0-mosquitto_2.0.18` | Docker Hub | Broker MQTT; autentica contra el backend. |
 
 El frontend se construye con `VITE_API_BASE_URL` **vacío**, así que el navegador
-llama a `/api/v1/...` en su propio origen y nginx lo reenvía a `backend:8080`
-(mismo origen: **no hace falta CORS**).
+llama a `/api/v1/...` en su propio origen y nginx lo reenvía a `gateway:8080`
+(mismo origen: **no hace falta CORS**). Los tres servicios Java tienen `healthcheck` con
+`/actuator/health`; el del servicio de seguridad y el del backend incluyen RabbitMQ y MySQL.
 
-## Modo desarrollo (backend en el PC)
+## Modo desarrollo (servicios en el PC)
 
-Para trabajar el backend desde el IDE o con `./mvnw spring-boot:run` / `./mvnw test`, levanta
-solo MySQL y el broker:
+Para trabajar los servicios desde el IDE o con `./mvnw spring-boot:run` / `./mvnw test`, levanta
+solo MySQL, RabbitMQ y el broker, y cada servicio en su terminal:
 
 ```bash
-docker compose stop backend frontend     # si la pila completa estaba arriba
-docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d mysql mosquitto
-cd ../backend/energy-monitor-backend && ./mvnw spring-boot:run
+docker compose stop gateway security backend frontend    # si la pila completa estaba arriba
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d mysql rabbitmq mosquitto
+cd ../backend/en-monitor-security-service && ./mvnw spring-boot:run   # :8082
+cd ../backend/energy-monitor-backend      && ./mvnw spring-boot:run   # :8083
+cd ../backend/en-monitor-api-gateway      && ./mvnw spring-boot:run   # :8080
 ```
 
-- Es la **misma base y el mismo broker** que la pila completa (mismos volúmenes y `.env`): lo que
-  hagas en un modo se ve en el otro.
-- El backend del PC se conecta con `application-local.yaml` y `SPRING_DATASOURCE_PASSWORD` de su
-  `.env`: ambos deben tener `MYSQL_PASSWORD` de `infra/.env`.
+- Es la **misma base, la misma cola y el mismo broker** que la pila completa (mismos volúmenes y
+  `.env`): lo que hagas en un modo se ve en el otro.
+- Cada servicio se conecta con su `application-local.yaml` y su `.env`: deben tener
+  `MYSQL_PASSWORD`, `RABBITMQ_USERNAME`/`RABBITMQ_PASSWORD` e `INTERNAL_API_TOKEN` de `infra/.env`.
+  La web de Vite (`:5173`) llama al gateway en `:8080`.
 - En este modo `backend` (quien autentica cada cliente MQTT) apunta al host con `host-gateway`.
   En Linux con `ufw` permite solo las redes de Docker, una vez:
 
@@ -143,31 +162,42 @@ cd ../backend/energy-monitor-backend && ./mvnw spring-boot:run
 
 ## Producción (servidor)
 
-`docker-compose.prod.yml` corre MySQL, backend, broker y frontend en un servidor (VPS Ubuntu con
+`docker-compose.prod.yml` corre MySQL, RabbitMQ, broker, los tres servicios y el frontend en un servidor (VPS Ubuntu con
 Docker, Nginx y Certbot). El procedimiento completo, con verificación y reversión, está en el
 manual de despliegue (`energy-monitor-docs-final/17-despliegue`). En resumen:
 
 1. **DNS**: registros A de `DOMINIO`, `www.DOMINIO` y `mqtt.DOMINIO` hacia la IP del VPS.
 2. **Servidor**: Docker, Nginx y Certbot; firewall con 22, 80, 443 y 8883 abiertos.
 3. **Código** en `/opt/energy-monitor` (`infra`, `backend/energy-monitor-backend`,
+   `backend/en-monitor-security-service`, `backend/en-monitor-api-gateway`,
    `frontend/energy-monitor-web`), como en "Requisitos".
-4. **Claves JWT** en `JWT_KEYS_DIR` (`/opt/energy-monitor/keys`), legibles por `BACKEND_UID` (10001).
+4. **Claves JWT** en `JWT_KEYS_DIR` (`/opt/energy-monitor/keys`): `private.pem` legible por
+   `BACKEND_UID` (10001, el servicio de seguridad) y `public.pem` legible por todos (644).
 5. **Nginx y certificados**: `deploy/nginx-energy-monitor.conf` (sitio que reenvía todo el dominio a
    `127.0.0.1:${WEB_PORT}`, por defecto 8081) y Certbot. El del broker va aparte
    (`certbot certonly --nginx -d mqtt.DOMINIO`) y `deploy/renew-mqtt-cert.sh`, instalado como hook
    de renovación, lo copia a `MQTT_CERT_DIR` y reinicia `mosquitto`. El firmware no cambia: confía
    en las raíces de Let's Encrypt.
 6. **Configuración**: `cp .env.prod.example .env.prod` y rellénalo (contraseñas, pepper,
-   `MQTT_BACKEND_PASS`, `DEVICE_MQTT_PUBLIC_HOST=mqtt.DOMINIO`, `https://DOMINIO` como origen y URL
+   `RABBITMQ_PASSWORD`, `INTERNAL_API_TOKEN`, `MQTT_BACKEND_PASS`, `DEVICE_MQTT_PUBLIC_HOST=mqtt.DOMINIO`, `https://DOMINIO` como origen y URL
    pública, correo, Google, VAPID, Expo). `chmod 600 .env.prod`.
 7. **Arranque**: `docker compose -f docker-compose.prod.yml --env-file .env.prod up -d --build`
 8. **Primer administrador**: registra la cuenta en la web y `./make-admin.sh --prod correo@ejemplo.com`.
 9. **Respaldo diario**: `deploy/backup-mysql.sh` en el cron de root.
 
-El nginx del frontend solo pasa `/api/` al backend, así que `/internal/**` nunca queda expuesto, y
-el backend corre con `SERVER_FORWARD_HEADERS_STRATEGY=native` para ver la IP real del cliente.
-1883, 3306, 8080 y 8081 no se abren en el firewall. Varias instancias del backend necesitan
-`MQTT_CLIENT_ID` distintos.
+El nginx del frontend solo pasa `/api/` al gateway, que rechaza `/internal/**`, y ni el gateway ni
+los servicios publican puertos. El gateway y el servicio de seguridad toman la IP real del cliente
+de `X-Forwarded-For` solo si la conexión viene de loopback o de la red de Docker. 1883, 3306, 8081
+y 15672 no se abren en el firewall; la consola de RabbitMQ se abre con un túnel
+(`ssh -L 15672:127.0.0.1:15672 servidor`). Varias instancias del backend necesitan `MQTT_CLIENT_ID`
+distintos.
+
+**Primer despliegue con el gateway** (el servidor tenía solo el backend): clona los dos
+repositorios nuevos, agrega a `.env.prod` `RABBITMQ_PASSWORD`, `INTERNAL_API_TOKEN` y
+`SECURITY_CONTEXT`/`GATEWAY_CONTEXT`, conserva el mismo `SECURITY_RESET_PEPPER` (con otro, los
+códigos de recuperación ya enviados dejan de servir) y ejecuta `deploy/deploy.sh infra`: crea
+RabbitMQ, construye el servicio de seguridad y el gateway y recrea el resto. Los changesets de
+seguridad ya aplicados por el backend antiguo se reconocen en `DATABASECHANGELOG` y no se repiten.
 
 Claves VAPID para push en el navegador (una vez por entorno; cambiarlas invalida las suscripciones):
 
@@ -180,19 +210,24 @@ rm vapid.pem
 
 ## CI/CD con GitHub Actions
 
-Cada repositorio (backend, web e infra) tiene `.github/workflows/ci-cd.yml`:
+Cada repositorio (gateway, servicio de seguridad, backend, web e infra) tiene
+`.github/workflows/ci-cd.yml`:
 
-- **CI** en cada PR y push a `dev`/`main`: backend `./mvnw test` contra MySQL 8.4 (servicio del
-  runner), web `vitest` + `npm run build`, infra `docker compose config` de los tres modos,
-  `shellcheck` y `nginx -t` de la plantilla.
+- **CI** en cada PR y push a `dev`/`main`: backend y servicio de seguridad `./mvnw test` contra
+  MySQL 8.4 (servicio del runner), gateway `./mvnw test` (no necesita nada más), web `vitest` +
+  `npm run build`, infra `docker compose config` de los tres modos, `shellcheck` y `nginx -t` de la
+  plantilla.
 - **CD** solo desde `main` (push o *Run workflow*), después de los tests y de la aprobación del
-  environment `production`: entra por SSH al VPS y ejecuta `deploy/deploy.sh backend|frontend|infra`.
-  El script respalda MySQL, hace `git pull` de `main`, reconstruye solo ese servicio y espera
-  `actuator/health`; si falla, vuelve a la versión anterior y el job queda en rojo.
+  environment `production`: entra por SSH al VPS y ejecuta
+  `deploy/deploy.sh backend|security|gateway|frontend|infra`. El script respalda MySQL, hace
+  `git pull` de `main`, reconstruye solo ese servicio y espera a que los tres servicios Java estén
+  `healthy`, la web responda 200 y `/api/v1/homes` responda 401 a través del gateway; si falla,
+  vuelve a la versión anterior y el job queda en rojo.
 
 La llave SSH de GitHub está restringida en `authorized_keys` a `deploy.sh`
 (`command="/opt/energy-monitor/infra/deploy/deploy.sh",no-pty,...`): no abre una consola ni
-ejecuta otra cosa. Secretos del environment `production` en cada repositorio: `DEPLOY_HOST`,
+ejecuta otra cosa. Secretos del environment `production` en cada repositorio (también en los dos
+nuevos): `DEPLOY_HOST`,
 `DEPLOY_USER`, `DEPLOY_SSH_KEY` y `DEPLOY_KNOWN_HOSTS`. Configuración paso a paso: manual de
 despliegue, sección 8.5.
 
@@ -217,17 +252,21 @@ El código del backend ya trae la integración; infra solo conecta las piezas:
 
 | Puerto | Servicio | Para qué |
 |---|---|---|
-| 80 | frontend (nginx) | La web; reenvía `/api/` al backend. |
-| 8080 | backend | REST `/api/v1` (abierto para depurar). |
+| 80 | frontend (nginx) | La web; reenvía `/api/` al gateway. |
 | 8883 | mosquitto | MQTT sobre TLS, para los dispositivos. |
-| 1883 | mosquitto | MQTT sin TLS, solo en `127.0.0.1`, para el backend. |
+| 1883 | mosquitto | MQTT sin TLS, solo en `127.0.0.1`. |
 | 3306 | mysql | Base de datos, solo en `127.0.0.1` (para depurar desde este PC). |
+| 5672 | rabbitmq | AMQP, solo en `127.0.0.1` (servicios del PC en modo desarrollo). |
+| 15672 | rabbitmq | Consola web, solo en `127.0.0.1`. |
+
+El gateway (8080), el servicio de seguridad (8082) y el backend (8083) no publican puertos en la
+pila completa.
 
 ## Comandos útiles
 
 ```bash
-docker compose logs -f backend        # ver el arranque del backend
-docker compose ps                     # estado de los contenedores
+docker compose logs -f backend        # ver el arranque del backend (o security, gateway)
+docker compose ps                     # estado y salud de los contenedores
 docker compose down                   # parar (conserva los volúmenes)
 docker compose down -v                # parar y borrar también los datos (MySQL y broker); claves y certificados quedan en disco
 docker compose up -d --build backend  # reconstruir solo el backend
@@ -236,9 +275,11 @@ docker compose up -d --build backend  # reconstruir solo el backend
 ## Verificación
 
 ```bash
-curl -s http://localhost:8080/actuator/health            # {"status":"UP",...}
+docker compose ps                                                     # gateway, security, backend (healthy)
 curl -s -o /dev/null -w '%{http_code}\n' http://localhost/          # 200 (web)
-curl -s -o /dev/null -w '%{http_code}\n' http://localhost/api/v1/homes  # 401 si no hay sesión (el proxy funciona)
+curl -s -o /dev/null -w '%{http_code}\n' http://localhost/api/v1/homes  # 401 sin sesión: lo responde el gateway
+curl -s -o /dev/null -w '%{http_code}\n' -X POST -H 'Content-Type: application/json' -d '{}' \
+  http://localhost/api/v1/auth/login                                  # 400: llegó al servicio de seguridad
 # MQTT: el backend ya está suscrito; confírmalo en el log del broker
 docker compose logs mosquitto | grep "New client connected"          # ... u'em-backend'
 ```
@@ -281,12 +322,22 @@ o las credenciales del backend con ACL de publicación; el broker **no** acepta 
   el backend del PC no está corriendo, o falta la regla de `ufw` de "Modo desarrollo" (con el
   puerto 8083: la de 8080 de antes ya no sirve).
 
-- **El backend tarda ~2 min en el primer arranque:** Liquibase ejecuta los 50 changesets
-  sobre la base nueva. Es normal; espera a `health = UP`.
+- **El backend o el servicio de seguridad tardan ~2 min en el primer arranque:** Liquibase
+  ejecuta sus changesets sobre la base nueva. Es normal; espera a `(healthy)` en `docker compose ps`.
+
+- **La API responde `503` por la web:** el gateway no alcanza al servicio de esa ruta. Mira
+  `docker compose ps` y `docker compose logs security backend`.
+
+- **El servicio de seguridad queda `unhealthy` con RabbitMQ arriba:** `RABBITMQ_USERNAME` /
+  `RABBITMQ_PASSWORD` no coinciden con el usuario que RabbitMQ creó la primera vez que arrancó su
+  volumen. Cámbialo dentro (`docker compose exec rabbitmq rabbitmqctl change_password ...`) o
+  borra el volumen `rabbitmq-data` (se pierden los mensajes pendientes).
 
 ## Notas
 
 - **Secretos**: `.env`, `.env.prod`, `keys/` y `mosquitto/certs/` están en `.gitignore`; no se versionan.
+  `INTERNAL_API_TOKEN` y `RABBITMQ_PASSWORD` son los mismos en los dos servicios: en la pila los toma
+  cada contenedor de este `.env`.
 - **Producción**: en un servidor se usa `docker-compose.prod.yml` (sección "Producción"), no la
   pila local.
 - **Certificados**: si cambia la IP de LAN del PC, actualiza `DEVICE_MQTT_PUBLIC_HOST` y vuelve a

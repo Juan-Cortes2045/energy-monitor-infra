@@ -61,6 +61,7 @@ RabbitMQ y MQTT sin TLS. El gateway y los tres servicios solo se alcanzan por la
 | `.env.example` / `.env.prod.example` | sí | Plantillas de `.env` / `.env.prod` |
 | `prepare.sh` | sí | Claves RSA, `.env` y certificado de desarrollo del broker |
 | `make-admin.sh` | sí | Da el rol global `ADMIN` a una cuenta (`--prod` en el servidor) |
+| `e2e/device-flow.sh` | sí | Prueba de punta a punta del servicio de dispositivos sobre la pila local |
 | `deploy/nginx-energy-monitor.conf` | sí | Sitio de Nginx del servidor (proxy HTTPS) |
 | `deploy/renew-mqtt-cert.sh` | sí | Hook de Certbot: copia el certificado del broker y reinicia `mosquitto` |
 | `deploy/backup-mysql.sh` | sí | Respaldo lógico diario de MySQL en el servidor |
@@ -308,6 +309,23 @@ curl -s -o /dev/null -w '%{http_code}\n' http://localhost/api/v1/appliance-types
 # MQTT: los dos servicios ya están suscritos; confírmalo en el log del broker
 docker compose logs mosquitto | grep "New client connected"          # ... u'em-backend' y u'em-device-service'
 ```
+
+### Prueba de punta a punta (servicio de dispositivos)
+
+Con la pila completa arriba y los cuatro servicios `(healthy)`:
+
+```bash
+./e2e/device-flow.sh
+```
+
+Crea una cuenta y un hogar de prueba (`e2e-*@example.com`) y recorre lo que cruza los servicios:
+rutas del gateway, vincular un módulo (el servicio de dispositivos pregunta al backend), el broker
+autenticando contra `device:8084` (clave correcta e incorrecta), telemetría (`ONLINE` en el servicio
+de dispositivos y la lectura guardada en el backend), estado `offline` (evento
+`device.connectivity-lost` y alerta `CONNECTIVITY` en el backend) y borrar el hogar (`home.deleted`:
+el módulo queda desvinculado y recibe el comando `unlink`). Termina con el número de comprobaciones
+que pasaron y sale con error si alguna falla. No imprime la API key del módulo. Usa `jq` y
+`openssl`, y `mosquitto_pub` dentro del contenedor del broker.
 
 Publicar telemetría de prueba requiere un dispositivo aprovisionado (su `device_code`/`api_key`)
 o las credenciales del backend con ACL de publicación; el broker **no** acepta clientes anónimos.

@@ -42,10 +42,10 @@ jobs:
 
       - name: Scripts
         run: |
-          for script in prepare.sh make-admin.sh mosquitto/generate-dev-certs.sh deploy/*.sh; do
+          for script in prepare.sh make-admin.sh mosquitto/generate-dev-certs.sh deploy/*.sh e2e/*.sh; do
             bash -n "$script"
           done
-          shellcheck -S error prepare.sh make-admin.sh mosquitto/generate-dev-certs.sh deploy/*.sh
+          shellcheck -S error prepare.sh make-admin.sh mosquitto/generate-dev-certs.sh deploy/*.sh e2e/*.sh
 
       - name: Nginx site template
         run: |

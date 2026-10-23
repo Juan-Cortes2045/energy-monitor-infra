@@ -76,5 +76,5 @@ echo "Generando los certificados de desarrollo del broker ..."
 
 echo
 echo "Listo. Siguientes pasos:"
-echo "  1. Revisa $here/.env (contrasenas, pepper, RABBITMQ_PASSWORD, INTERNAL_API_TOKEN, DEVICE_MQTT_PUBLIC_HOST)."
+echo "  1. Revisa $here/.env (contrasenas, pepper, RABBITMQ_PASSWORD, INTERNAL_API_TOKEN, MQTT_BACKEND_PASS, MQTT_DEVICE_SERVICE_PASS, DEVICE_MQTT_PUBLIC_HOST)."
 echo "  2. cd $here && docker compose up -d --build"

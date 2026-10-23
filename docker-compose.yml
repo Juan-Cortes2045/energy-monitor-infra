@@ -17,15 +17,15 @@
 #   5672  RabbitMQ (AMQP), solo en 127.0.0.1; 15672 su consola web, solo en 127.0.0.1
 #
 # El gateway es la unica entrada de la API: reenvia /api/v1/auth/** y /api/v1/admin/users|roles/**
-# al servicio de seguridad (8082) y el resto de /api/v1/** a energy-monitor-backend (8083). Ni esos
-# dos ni el gateway publican puertos: solo se alcanzan por la red de Docker, asi que /internal/**
-# nunca queda expuesto.
+# al servicio de seguridad (8082), /api/v1/homes/*/devices/** y /api/v1/appliance-types/** al
+# servicio de dispositivos (8084) y el resto de /api/v1/** a energy-monitor-backend (8083). Ni los
+# servicios ni el gateway publican puertos: solo se alcanzan por la red de Docker, asi que
+# /internal/** nunca queda expuesto.
 #
-# La integracion MQTT ya esta hecha en el codigo: el broker delega la autenticacion de
-# cada dispositivo en el backend (POST /internal/mqtt/auth/user y /acl). Aqui solo se
-# pone al broker y al backend en la misma red Docker y se usa el mismo mosquitto.conf
-# que en produccion (./mosquitto/mosquitto.conf), donde "backend" resuelve al servicio
-# de abajo.
+# La integracion MQTT ya esta hecha en el codigo: el broker delega la autenticacion de cada
+# cliente en el servicio de dispositivos (POST /internal/mqtt/auth/user y /acl). Aqui solo se
+# pone al broker y a ese servicio en la misma red Docker y se usa el mismo mosquitto.conf que en
+# produccion (./mosquitto/mosquitto.conf), donde "device" resuelve al servicio de abajo.
 #
 # Otros modos (ver README):
 #   docker-compose.dev.yml   solo MySQL, RabbitMQ y el broker; los servicios corren en este PC (./mvnw)
@@ -125,6 +125,59 @@ services:
     stop_grace_period: 30s
     restart: unless-stopped
 
+  # Dispositivos: vinculacion, credenciales MQTT, autenticacion del broker, comandos y
+  # conectividad. Solo recibe public.pem (valida los tokens, no los firma).
+  device:
+    build:
+      context: ${DEVICE_CONTEXT:-../backend/en-monitor-device-service}
+    image: energy-monitor-device:local
+    container_name: energy-monitor-device
+    depends_on:
+      mysql:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    environment:
+      # Cualquier perfil distinto de "local" (el de application-local.yaml).
+      SPRING_PROFILES_ACTIVE: prod
+      # La misma base que los otros servicios: aplica solo los changesets device-*.
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/energy_monitor?connectionTimeZone=UTC&forceConnectionTimeZoneToSession=true
+      SPRING_DATASOURCE_USERNAME: energy_app
+      SPRING_DATASOURCE_PASSWORD: ${MYSQL_PASSWORD:?MYSQL_PASSWORD is required}
+      SECURITY_JWT_PUBLIC_KEY_PATH: /run/keys/public.pem
+      INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:?INTERNAL_API_TOKEN is required}
+      # Pregunta al backend si quien llama es miembro o dueño del hogar.
+      BACKEND_INTERNAL_URL: http://backend:8083
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_USERNAME: ${RABBITMQ_USERNAME:-energy-monitor}
+      RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:?RABBITMQ_PASSWORD is required}
+      # Se suscribe a telemetria y estado (conectividad) y envia los comandos, por el listener
+      # interno (1883) de la misma red.
+      MQTT_BROKER_URL: tcp://mosquitto:1883
+      MQTT_CLIENT_ID: device-service-local
+      MQTT_DEVICE_SERVICE_USER: ${MQTT_DEVICE_SERVICE_USER:-em-device-service}
+      MQTT_DEVICE_SERVICE_PASS: ${MQTT_DEVICE_SERVICE_PASS:?MQTT_DEVICE_SERVICE_PASS is required}
+      # El broker le pregunta tambien por el backend: estas son las credenciales que acepta para el.
+      MQTT_BACKEND_USER: ${MQTT_BACKEND_USER:-em-backend}
+      MQTT_BACKEND_PASS: ${MQTT_BACKEND_PASS:?MQTT_BACKEND_PASS is required}
+      # Solo la red interna de Docker (y loopback) puede llamar a /internal/mqtt/auth/**.
+      MQTT_AUTH_ALLOWED_NETWORKS: 172.16.0.0/12,127.0.0.1/32
+      # Direccion del broker que la web escribe al modulo al vincularlo por Bluetooth:
+      # la IP de LAN de este PC (nunca localhost) o el dominio del broker.
+      DEVICE_MQTT_PUBLIC_HOST: ${DEVICE_MQTT_PUBLIC_HOST:?DEVICE_MQTT_PUBLIC_HOST is required}
+      DEVICE_MQTT_PUBLIC_PORT: ${DEVICE_MQTT_PUBLIC_PORT:-8883}
+    volumes:
+      - ./keys/public.pem:/run/keys/public.pem:ro
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8084/actuator/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 120s
+    # Al parar se desuscribe del broker y cierra las peticiones en curso.
+    stop_grace_period: 30s
+    restart: unless-stopped
+
   backend:
     build:
       context: ${BACKEND_CONTEXT:-../backend/energy-monitor-backend}
@@ -153,17 +206,13 @@ services:
       MAIL_USERNAME: ${MAIL_USERNAME:-}
       MAIL_PASSWORD: ${MAIL_PASSWORD:-}
       MAIL_FROM: ${MAIL_FROM:-}
-      # El backend habla con el broker por el listener interno (1883) de la misma red.
+      # Lee los dispositivos (con cache) del servicio de dispositivos.
+      DEVICE_SERVICE_URL: http://device:8084
+      # El backend solo lee la telemetria, por el listener interno (1883) de la misma red.
       MQTT_BROKER_URL: tcp://mosquitto:1883
       MQTT_BACKEND_USER: ${MQTT_BACKEND_USER:-em-backend}
       MQTT_BACKEND_PASS: ${MQTT_BACKEND_PASS:?MQTT_BACKEND_PASS is required}
       MQTT_CLIENT_ID: energy-monitor-backend-local
-      # Solo la red interna de Docker (y loopback) puede llamar a /internal/mqtt/auth/**.
-      MQTT_AUTH_ALLOWED_NETWORKS: 172.16.0.0/12,127.0.0.1/32
-      # Direccion del broker que la web escribe al modulo al vincularlo por Bluetooth:
-      # la IP de LAN de este PC (nunca localhost) o el dominio del broker.
-      DEVICE_MQTT_PUBLIC_HOST: ${DEVICE_MQTT_PUBLIC_HOST:?DEVICE_MQTT_PUBLIC_HOST is required}
-      DEVICE_MQTT_PUBLIC_PORT: ${DEVICE_MQTT_PUBLIC_PORT:-8883}
       NOTIFICATION_WEB_URL: ${NOTIFICATION_WEB_URL:-http://localhost}
       NOTIFICATION_VAPID_PUBLIC_KEY: ${NOTIFICATION_VAPID_PUBLIC_KEY:-}
       NOTIFICATION_VAPID_PRIVATE_KEY: ${NOTIFICATION_VAPID_PRIVATE_KEY:-}
@@ -182,7 +231,7 @@ services:
     stop_grace_period: 30s
     restart: unless-stopped
 
-  # Unica entrada de la API: CORS, token, limite de intentos y reparto entre los dos servicios.
+  # Unica entrada de la API: CORS, token, limite de intentos y reparto entre los servicios.
   gateway:
     build:
       context: ${GATEWAY_CONTEXT:-../backend/en-monitor-api-gateway}
@@ -190,6 +239,8 @@ services:
     container_name: energy-monitor-gateway
     depends_on:
       security:
+        condition: service_started
+      device:
         condition: service_started
       backend:
         condition: service_started
@@ -199,6 +250,7 @@ services:
       # origen (p. ej. el servidor de desarrollo de Vite).
       SECURITY_CORS_ALLOWED_ORIGINS: ${SECURITY_CORS_ALLOWED_ORIGINS:-http://localhost}
       SECURITY_SERVICE_URL: http://security:8082
+      DEVICE_SERVICE_URL: http://device:8084
       BACKEND_URL: http://backend:8083
     volumes:
       - ./keys/public.pem:/run/keys/public.pem:ro
@@ -226,12 +278,13 @@ services:
     image: iegomez/mosquitto-go-auth:3.0.0-mosquitto_2.0.18
     container_name: energy-monitor-mqtt
     depends_on:
-      backend:
+      # Quien autentica a cada cliente MQTT.
+      device:
         condition: service_started
       mosquitto-data-owner:
         condition: service_completed_successfully
     ports:
-      # Listener interno del backend, solo loopback.
+      # Listener interno de los servicios, solo loopback.
       - "127.0.0.1:1883:1883"
       # Dispositivos por TLS: toda la LAN.
       - "8883:8883"

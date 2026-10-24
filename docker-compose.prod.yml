@@ -81,6 +81,8 @@ services:
       SECURITY_JWT_PRIVATE_KEY_PATH: /run/keys/private.pem
       SECURITY_JWT_PUBLIC_KEY_PATH: /run/keys/public.pem
       SECURITY_RESET_PEPPER: ${SECURITY_RESET_PEPPER:?SECURITY_RESET_PEPPER is required}
+      # Cookies HttpOnly de la sesión web con Secure: el sitio se sirve por HTTPS.
+      SECURITY_SESSION_COOKIE_SECURE: "true"
       GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
       GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
       RABBITMQ_HOST: rabbitmq

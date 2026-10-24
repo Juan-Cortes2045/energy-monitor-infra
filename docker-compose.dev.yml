@@ -6,6 +6,7 @@
 #
 #   docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d mysql rabbitmq mosquitto
 #   cd ../backend/en-monitor-security-service && ./mvnw spring-boot:run    # :8082
+#   cd ../backend/en-monitor-device-service   && ./mvnw spring-boot:run    # :8084
 #   cd ../backend/energy-monitor-backend      && ./mvnw spring-boot:run    # :8083
 #   cd ../backend/en-monitor-api-gateway      && ./mvnw spring-boot:run    # :8080
 #
@@ -13,17 +14,19 @@
 # .env), asi que el .env y el application-local.yaml de cada servicio deben usar MYSQL_PASSWORD,
 # RABBITMQ_USERNAME/RABBITMQ_PASSWORD e INTERNAL_API_TOKEN de infra/.env.
 # Si la pila completa estaba arriba, primero:
-#   docker compose stop gateway security backend frontend
+#   docker compose stop gateway security device backend frontend
 #
-# energy-monitor-backend corre en el host, asi que "backend" (el que autentica a cada cliente MQTT)
-# apunta al host con host-gateway. En Linux con ufw hace falta permitir la red de Docker:
-#   sudo ufw allow from 172.16.0.0/12 to any port 8083 proto tcp comment 'mosquitto -> backend'
+# El servicio de dispositivos corre en el host, asi que "device" (el que autentica a cada cliente
+# MQTT) apunta al host con host-gateway. En Linux con ufw hace falta permitir la red de Docker:
+#   sudo ufw allow from 172.16.0.0/12 to any port 8084 proto tcp comment 'mosquitto -> device'
+# El .env de ese servicio debe tener MQTT_DEVICE_SERVICE_USER/PASS y MQTT_BACKEND_USER/PASS de
+# infra/.env: con ellos decide quien entra al broker.
 
 services:
   mosquitto:
-    # Sin el contenedor del backend: el broker solo espera a que su volumen tenga dueño.
+    # Sin el contenedor del servicio de dispositivos: el broker solo espera a que su volumen tenga dueño.
     depends_on: !override
       mosquitto-data-owner:
         condition: service_completed_successfully
     extra_hosts:
-      - "backend:host-gateway"
+      - "device:host-gateway"

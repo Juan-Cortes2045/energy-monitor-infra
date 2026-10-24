@@ -221,11 +221,11 @@ Cada servicio que corre en el PC lee el `.env` de su carpeta, copiado de su `.en
 
 | Archivo | Valores de `infra/.env` | Propios del modo desarrollo |
 |---|---|---|
-| `backend/en-monitor-security-service/.env` | `MYSQL_PASSWORD`, `SECURITY_RESET_PEPPER`, `GOOGLE_CLIENT_ID/SECRET`, `RABBITMQ_*`, `INTERNAL_API_TOKEN` | `SECURITY_JWT_PRIVATE_KEY_PATH`, `SECURITY_JWT_PUBLIC_KEY_PATH` |
+| `backend/en-monitor-security-service/.env` | `MYSQL_PASSWORD`, `SECURITY_RESET_PEPPER`, `GOOGLE_CLIENT_ID/SECRET`, `RABBITMQ_*`, `INTERNAL_API_TOKEN` | `SECURITY_JWT_PRIVATE_KEY_PATH`, `SECURITY_JWT_PUBLIC_KEY_PATH`, `SECURITY_SESSION_COOKIE_SECURE=false` |
 | `backend/en-monitor-device-service/.env` | `MYSQL_PASSWORD`, `RABBITMQ_*`, `INTERNAL_API_TOKEN`, `MQTT_BACKEND_USER/PASS`, `MQTT_DEVICE_SERVICE_USER/PASS`, `DEVICE_MQTT_PUBLIC_HOST` | `SECURITY_JWT_PUBLIC_KEY_PATH` |
 | `backend/energy-monitor-backend/.env` | `MYSQL_PASSWORD`, `MAIL_*`, `RABBITMQ_*`, `INTERNAL_API_TOKEN`, `MQTT_BACKEND_USER/PASS`, VAPID, `EXPO_ACCESS_TOKEN` | `SECURITY_JWT_PUBLIC_KEY_PATH`, `NOTIFICATION_WEB_URL=http://localhost:5173` |
 | `backend/en-monitor-api-gateway/.env` | — | `SECURITY_JWT_PUBLIC_KEY_PATH`, `SECURITY_CORS_ALLOWED_ORIGINS=http://localhost:5173` |
-| `frontend/energy-monitor-web/.env.local` | `VITE_GOOGLE_CLIENT_ID` | `VITE_API_BASE_URL=http://localhost:8080` |
+| `frontend/energy-monitor-web/.env.local` | `VITE_GOOGLE_CLIENT_ID` | Nada más: Vite reenvía `/api` al gateway de `:8080` (otro puerto: `VITE_DEV_API_TARGET`) |
 | `frontend/energy-monitor-mobile/.env` | — | `EXPO_PUBLIC_API_BASE_URL`: `http://<IP de LAN>:8080` en modo desarrollo o `http://<IP de LAN>` con la pila completa. `EXPO_PUBLIC_EAS_PROJECT_ID`: expo.dev → proyecto → *Project settings* |
 
 Las rutas de las claves deben ser absolutas, porque Java no expande `~`. Los servicios del PC
@@ -460,7 +460,9 @@ Con la pila completa arriba y los cuatro servicios `(healthy)`:
 ./e2e/device-flow.sh
 ```
 
-Crea una cuenta y un hogar de prueba (`e2e-*@example.com`) y recorre lo que cruza los servicios:
+Crea una cuenta (`MAIL_USERNAME` con el sufijo `+e2e-…`, porque el registro exige un dominio que
+reciba correo) y un hogar de prueba; comprueba que sin verificar el correo el
+login responde 403 y marca la dirección como verificada en la base. Luego recorre lo que cruza los servicios:
 rutas del gateway, vincular un módulo (el servicio de dispositivos pregunta al backend), el broker
 autenticando contra `device:8084` (clave correcta e incorrecta), telemetría (`ONLINE` en el servicio
 de dispositivos y la lectura guardada en el backend), estado `offline` (evento
@@ -530,6 +532,10 @@ o las credenciales del backend con ACL de publicación; el broker **no** acepta 
 ## Notas
 
 - **Secretos**: `.env`, `.env.prod`, `keys/` y `mosquitto/certs/` están en `.gitignore`; no se versionan.
+- **Sesión de la web**: los tokens viajan en cookies HttpOnly que pone el servicio de seguridad
+  (ver su README, "Sessions"). `docker-compose.yml` las deja sin `Secure` porque la pila local se
+  sirve por `http://`; `docker-compose.prod.yml` las marca `Secure` (el sitio va por HTTPS). En
+  modo desarrollo el `.env` del servicio de seguridad lleva `SECURITY_SESSION_COOKIE_SECURE=false`.
   `INTERNAL_API_TOKEN` y `RABBITMQ_PASSWORD` son los mismos en todos los servicios: en la pila los toma
   cada contenedor de este `.env`.
 - **Producción**: en un servidor se usa `docker-compose.prod.yml` (sección "Producción"), no la

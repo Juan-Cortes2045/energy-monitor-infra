@@ -11,7 +11,7 @@
 # device.connectivity-lost -> alerta CONNECTIVITY en el backend) -> borrar el hogar (home.deleted
 # -> device desvincula el modulo). Tambien comprueba lo que debe rechazarse.
 #
-# Crea una cuenta y un hogar de prueba (e2e-*@example.com); al final borra el hogar. No imprime
+# Crea una cuenta (MAIL_USERNAME+e2e-...) y un hogar de prueba; al final borra el hogar. No imprime
 # la API key del modulo.
 set -euo pipefail
 
@@ -49,9 +49,18 @@ check "/internal/** no llega a los servicios" text/html \
   "$(curl -s -o /dev/null -w '%{content_type}' http://localhost/internal/devices/X | cut -d';' -f1)"
 
 echo "2. Cuenta y hogar"
-email="e2e-$(date +%s)@example.com"; password='E2e-Pass-2026!'
+# El registro exige un dominio que reciba correo (example.com no lo recibe). Se usa la cuenta de
+# correo del proyecto con un sufijo "+e2e-...": el código de verificación llega a su propio buzón.
+mail_user="$(grep '^MAIL_USERNAME=' "$here/.env" | cut -d= -f2-)"
+[[ "$mail_user" == *@* ]] || { echo "Falta MAIL_USERNAME en .env (la prueba registra una cuenta con ese dominio)"; exit 1; }
+email="${mail_user%@*}+e2e-$(date +%s)@${mail_user#*@}"; password='E2e-Pass-2026!'
 check "registro (security)" 201 "$(status -X POST -H 'Content-Type: application/json' \
   -d "{\"email\":\"$email\",\"password\":\"$password\",\"name\":\"E2E\",\"lastName\":\"Device\"}" "$API/auth/register")"
+check "sin verificar el correo no hay sesión" 403 "$(status -X POST -H 'Content-Type: application/json' \
+  -d "{\"email\":\"$email\",\"password\":\"$password\"}" "$API/auth/login")"
+# El código de verificación llega por correo; la prueba marca la dirección como verificada en la
+# base, como si se hubiera escrito el código.
+mysql_q "UPDATE user SET email_verified = 1 WHERE email = '$email' AND deleted_at IS NULL"
 token="$(curl -fsS -X POST -H 'Content-Type: application/json' \
   -d "{\"email\":\"$email\",\"password\":\"$password\"}" "$API/auth/login" | jq -r .accessToken)"
 auth=(-H "Authorization: Bearer $token")

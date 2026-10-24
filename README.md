@@ -82,11 +82,9 @@ de desarrollo.
 
 ```bash
 cd infra
-cp .env.example .env      # rellena los valores (o déjalo: prepare.sh lo crea)
+cp .env.example .env      # y rellénalo: sección "Variables de entorno"
 ./prepare.sh              # genera el par RSA de los JWT y los certificados del broker
-# edita .env: contraseñas, SECURITY_RESET_PEPPER, RABBITMQ_PASSWORD, INTERNAL_API_TOKEN,
-# MQTT_BACKEND_PASS, MQTT_DEVICE_SERVICE_PASS, DEVICE_MQTT_PUBLIC_HOST y (opcional) GOOGLE_CLIENT_ID/GOOGLE_CLIENT_SECRET
-# + VITE_GOOGLE_CLIENT_ID
+docker compose config -q  # nombra la variable obligatoria que falte, si falta alguna
 docker compose up -d --build
 docker compose ps         # gateway, security, device y backend deben quedar (healthy)
 ```
@@ -96,6 +94,161 @@ a través del gateway; la app móvil en la LAN usa `http://<IP de LAN>` como
 `EXPO_PUBLIC_API_BASE_URL`. La consola de RabbitMQ está en <http://localhost:15672>
 (`RABBITMQ_USERNAME` / `RABBITMQ_PASSWORD`). Swagger de cada servicio: en modo desarrollo
 (`http://localhost:8082/swagger-ui.html`, `:8084` y `:8083`), porque en la pila completa no publican puertos.
+
+## Variables de entorno
+
+`docker compose` lee `infra/.env`, la copia de `.env.example`. En modo desarrollo cada servicio lee
+además su propio `.env`, con los mismos valores compartidos (tabla al final de esta sección).
+Ninguno se versiona. En todos:
+
+- Escribe `CLAVE=valor` sin comillas, sin espacios al final y sin `$`. Spring los lee como
+  `.properties` y Compose interpreta `$`.
+- No dejes los textos de ejemplo (`CHANGE_ME_...`). El sistema arranca igual, pero esos valores
+  están publicados en el repositorio.
+- Protege cada archivo con `chmod 600`.
+
+### Paso a paso (`infra/.env`)
+
+1. **Crea el archivo.** `prepare.sh` lo crea si falta y pone tu uid/gid en `BACKEND_UID`/`BACKEND_GID`.
+
+   ```bash
+   cd infra
+   cp .env.example .env && chmod 600 .env
+   ```
+
+2. **Genera los secretos aleatorios.** Este bloque rellena solo los que están vacíos y no
+   imprime ninguno:
+
+   ```bash
+   gen() { grep -q "^$1=$" .env && sed -i "s|^$1=$|$1=$(openssl rand -hex "$2")|" .env; }
+   gen MYSQL_PASSWORD 16;    gen MYSQL_ROOT_PASSWORD 16; gen SECURITY_RESET_PEPPER 32
+   gen RABBITMQ_PASSWORD 24; gen INTERNAL_API_TOKEN 32;  gen MQTT_BACKEND_PASS 24
+   gen MQTT_DEVICE_SERVICE_PASS 24
+   ```
+
+3. **Pon la IP de LAN del PC** y reemite el certificado del broker. Repítelo cada vez que cambie
+   la IP, por ejemplo al cambiar de red:
+
+   ```bash
+   sed -i "s|^DEVICE_MQTT_PUBLIC_HOST=.*|DEVICE_MQTT_PUBLIC_HOST=$(hostname -I | awk '{print $1}')|" .env
+   ./prepare.sh
+   ```
+
+4. **Rellena los valores de servicios externos:** correo, Google, VAPID y Expo. Todos son
+   opcionales; cómo obtener cada uno está más abajo.
+
+5. **Comprueba:**
+
+   ```bash
+   docker compose config -q && echo "compose OK"         # si falta una obligatoria, la nombra
+   grep -lE '^[A-Z_]+=.*CHANGE_ME' .env ../backend/*/.env  # no debe listar ningún archivo
+   ```
+
+### De dónde sale cada valor
+
+| Variable | Obligatoria | Cómo se obtiene |
+|---|---|---|
+| `MYSQL_PASSWORD`, `MYSQL_ROOT_PASSWORD` | sí | `openssl rand -hex 16`. La primera es la del usuario `energy_app` de los servicios; la segunda, la de `root`. MySQL la toma solo al crear el volumen (ver abajo). |
+| `SECURITY_RESET_PEPPER` | sí | `openssl rand -hex 32`. Protege los códigos de recuperación: si lo cambias, los códigos ya enviados dejan de servir. |
+| `SECURITY_CORS_ALLOWED_ORIGINS`, `NOTIFICATION_WEB_URL` | no | `http://localhost`, el origen de la web en la pila completa. |
+| `BACKEND_UID`, `BACKEND_GID` | no | `id -u` / `id -g`. Los pone `prepare.sh`. |
+| `RABBITMQ_USERNAME`, `RABBITMQ_PASSWORD` | la clave | `energy-monitor` y `openssl rand -hex 24`. RabbitMQ los toma solo al crear el volumen (ver abajo). |
+| `INTERNAL_API_TOKEN` | sí | `openssl rand -hex 32`. Lo comparten seguridad, dispositivos y backend en `/internal/**`. |
+| `DEVICE_MQTT_PUBLIC_HOST` | sí | La IP de LAN del PC (`hostname -I`), nunca `localhost`: es la dirección que la web escribe al módulo. Luego `./prepare.sh`. |
+| `DEVICE_MQTT_PUBLIC_PORT` | no | `8883`. |
+| `MQTT_BACKEND_USER/PASS`, `MQTT_DEVICE_SERVICE_USER/PASS` | las claves | Deja los usuarios por defecto y genera cada clave con `openssl rand -hex 24`. El broker no guarda usuarios: los comprueba el servicio de dispositivos. |
+| `MAIL_HOST`, `MAIL_PORT` | no | `smtp.gmail.com` y `587`. |
+| `MAIL_USERNAME`, `MAIL_PASSWORD`, `MAIL_FROM` | no | La cuenta de Gmail y su contraseña de aplicación (ver abajo). En `MAIL_FROM`: `EnergyMonitor <esa cuenta>`. Sin ellas no salen los correos de verificación, recuperación ni alertas. |
+| `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `VITE_GOOGLE_CLIENT_ID` | no | El cliente OAuth de Google (ver abajo). `VITE_GOOGLE_CLIENT_ID` lleva el mismo ID. Si están vacías, no aparece el botón de Google. |
+| `NOTIFICATION_VAPID_PUBLIC_KEY`, `NOTIFICATION_VAPID_PRIVATE_KEY` | no | Comandos de abajo, una vez por entorno. Si están vacías, no hay notificaciones push en el navegador. |
+| `EXPO_ACCESS_TOKEN` | no | En expo.dev: *Account settings → Access tokens → Create token*. Si está vacía, no hay push en la app móvil. Va solo en el servidor, nunca en la app. |
+| `*_CONTEXT` | no | Solo si los repositorios no están clonados uno al lado del otro (ver "Requisitos"). |
+
+**Contraseña de aplicación de Gmail** (`MAIL_PASSWORD`). Tu contraseña normal de Gmail no sirve
+para SMTP:
+
+1. Con la cuenta que enviará los correos, activa la **Verificación en 2 pasos** en
+   <https://myaccount.google.com/security>.
+2. Abre <https://myaccount.google.com/apppasswords>, escribe un nombre (`EnergyMonitor`) y pulsa
+   *Crear*.
+3. Copia los 16 caracteres **sin espacios** en `MAIL_PASSWORD`.
+
+**Cliente OAuth de Google** (`GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`):
+
+1. En <https://console.cloud.google.com>, crea o elige un proyecto.
+2. Abre la pantalla de consentimiento (*Google Auth Platform*, o *APIs y servicios → Pantalla de
+   consentimiento de OAuth*) y elige el tipo *Externo*. Mientras esté en *Testing*, agrega en
+   *Test users* las cuentas que van a probar.
+3. Ve a *Credenciales → Crear credenciales → ID de cliente de OAuth* y elige el tipo **Aplicación
+   web**. En *Orígenes autorizados de JavaScript* agrega `http://localhost` (pila completa) y
+   `http://localhost:5173` (web de Vite en modo desarrollo).
+4. Copia el *ID de cliente* en `GOOGLE_CLIENT_ID` y en `VITE_GOOGLE_CLIENT_ID`, y el *Secreto del
+   cliente* en `GOOGLE_CLIENT_SECRET`. `VITE_GOOGLE_CLIENT_ID` va dentro del build: si lo cambias,
+   corre `docker compose up -d --build frontend`.
+
+**Claves VAPID** (push en el navegador). Genéralas una vez por entorno; cambiarlas invalida las
+suscripciones:
+
+```bash
+openssl ecparam -name prime256v1 -genkey -noout -out vapid.pem
+echo "NOTIFICATION_VAPID_PRIVATE_KEY=$(openssl ec -in vapid.pem -outform DER | tail -c +8 | head -c 32 | base64 -w0 | tr '+/' '-_' | tr -d '=')"
+echo "NOTIFICATION_VAPID_PUBLIC_KEY=$(openssl ec -in vapid.pem -pubout -outform DER | tail -c 65 | base64 -w0 | tr '+/' '-_' | tr -d '=')"
+rm vapid.pem
+```
+
+### Valores que guarda un volumen
+
+MySQL y RabbitMQ crean su usuario con los valores de `.env` solo la primera vez que arranca su
+volumen. Si después cambias `MYSQL_PASSWORD` o `RABBITMQ_PASSWORD` en `.env`, el servicio rechaza
+la clave nueva hasta que la cambies también dentro. Estos comandos leen la clave de `.env`, así que
+no hace falta escribirla:
+
+```bash
+grep '^RABBITMQ_PASSWORD=' .env | cut -d= -f2- \
+  | docker exec -i energy-monitor-rabbitmq rabbitmqctl change_password energy-monitor
+docker exec -e MYSQL_PWD="$(grep '^MYSQL_ROOT_PASSWORD=' .env | cut -d= -f2-)" energy-monitor-mysql \
+  mysql -uroot -e "ALTER USER 'energy_app'@'%' IDENTIFIED BY '$(grep '^MYSQL_PASSWORD=' .env | cut -d= -f2-)'"
+docker compose up -d      # recrea los servicios con los valores nuevos
+```
+
+Otra opción es `docker compose down -v`, que vuelve a crear los usuarios pero borra los datos.
+
+### Los `.env` de cada servicio (modo desarrollo)
+
+Cada servicio que corre en el PC lee el `.env` de su carpeta, copiado de su `.env.example`, y el
+`application-local.yaml`, copiado de su `.example`. Los valores compartidos son los de
+`infra/.env`. `MYSQL_PASSWORD` cambia de nombre: allí se llama `SPRING_DATASOURCE_PASSWORD`.
+
+| Archivo | Valores de `infra/.env` | Propios del modo desarrollo |
+|---|---|---|
+| `backend/en-monitor-security-service/.env` | `MYSQL_PASSWORD`, `SECURITY_RESET_PEPPER`, `GOOGLE_CLIENT_ID/SECRET`, `RABBITMQ_*`, `INTERNAL_API_TOKEN` | `SECURITY_JWT_PRIVATE_KEY_PATH`, `SECURITY_JWT_PUBLIC_KEY_PATH`, `SECURITY_SESSION_COOKIE_SECURE=false` |
+| `backend/en-monitor-device-service/.env` | `MYSQL_PASSWORD`, `RABBITMQ_*`, `INTERNAL_API_TOKEN`, `MQTT_BACKEND_USER/PASS`, `MQTT_DEVICE_SERVICE_USER/PASS`, `DEVICE_MQTT_PUBLIC_HOST` | `SECURITY_JWT_PUBLIC_KEY_PATH` |
+| `backend/energy-monitor-backend/.env` | `MYSQL_PASSWORD`, `MAIL_*`, `RABBITMQ_*`, `INTERNAL_API_TOKEN`, `MQTT_BACKEND_USER/PASS`, VAPID, `EXPO_ACCESS_TOKEN` | `SECURITY_JWT_PUBLIC_KEY_PATH`, `NOTIFICATION_WEB_URL=http://localhost:5173` |
+| `backend/en-monitor-api-gateway/.env` | — | `SECURITY_JWT_PUBLIC_KEY_PATH`, `SECURITY_CORS_ALLOWED_ORIGINS=http://localhost:5173` |
+| `frontend/energy-monitor-web/.env.local` | `VITE_GOOGLE_CLIENT_ID` | Nada más: Vite reenvía `/api` al gateway de `:8080` (otro puerto: `VITE_DEV_API_TARGET`) |
+| `frontend/energy-monitor-mobile/.env` | — | `EXPO_PUBLIC_API_BASE_URL`: `http://<IP de LAN>:8080` en modo desarrollo o `http://<IP de LAN>` con la pila completa. `EXPO_PUBLIC_EAS_PROJECT_ID`: expo.dev → proyecto → *Project settings* |
+
+Las rutas de las claves deben ser absolutas, porque Java no expande `~`. Los servicios del PC
+pueden usar su propio par de claves:
+
+```bash
+mkdir -p ~/.energy-monitor/keys && chmod 700 ~/.energy-monitor/keys
+openssl genpkey -algorithm RSA -out ~/.energy-monitor/keys/private.pem -pkeyopt rsa_keygen_bits:2048
+openssl rsa -in ~/.energy-monitor/keys/private.pem -pubout -out ~/.energy-monitor/keys/public.pem
+```
+
+También pueden apuntar a `infra/keys/`, el par de la pila completa.
+
+Para comprobar que un valor compartido es el mismo en todos los archivos sin mostrarlo, compara
+sus resúmenes:
+
+```bash
+for v in RABBITMQ_PASSWORD INTERNAL_API_TOKEN MQTT_BACKEND_PASS; do
+  for f in .env ../backend/*/.env; do
+    grep -q "^$v=" "$f" && echo "$v $(grep "^$v=" "$f" | cut -d= -f2- | sha256sum | cut -c1-8) $f"
+  done
+done      # cada variable debe dar el mismo resumen en todos sus archivos
+```
 
 ## Cuentas: registro, primer administrador y Google
 
@@ -156,12 +309,9 @@ cd ../backend/en-monitor-api-gateway      && ./mvnw spring-boot:run   # :8080
 
 - Es la **misma base, la misma cola y el mismo broker** que la pila completa (mismos volúmenes y
   `.env`): lo que hagas en un modo se ve en el otro.
-- Cada servicio se conecta con su `application-local.yaml` y su `.env`: deben tener
-  `MYSQL_PASSWORD`, `RABBITMQ_USERNAME`/`RABBITMQ_PASSWORD` e `INTERNAL_API_TOKEN` de `infra/.env`.
-  La web de Vite (`:5173`) llama al gateway en `:8080`.
-- El `.env` del servicio de dispositivos lleva además `MQTT_DEVICE_SERVICE_USER/PASS` y
-  `MQTT_BACKEND_USER/PASS` de `infra/.env` (con ellos decide quién entra al broker), y el del
-  backend `MQTT_BACKEND_USER/PASS`.
+- Cada servicio se conecta con su `application-local.yaml` y su `.env`, con los valores de
+  `infra/.env` (tabla en "Variables de entorno"). La web de Vite (`:5173`) llama al gateway en
+  `:8080`.
 - En este modo `device` (quien autentica cada cliente MQTT) apunta al host con `host-gateway`.
   En Linux con `ufw` permite solo las redes de Docker, una vez:
 
@@ -191,7 +341,8 @@ manual de despliegue (`energy-monitor-docs-final/17-despliegue`). En resumen:
    en las raíces de Let's Encrypt.
 6. **Configuración**: `cp .env.prod.example .env.prod` y rellénalo (contraseñas, pepper,
    `RABBITMQ_PASSWORD`, `INTERNAL_API_TOKEN`, `MQTT_BACKEND_PASS`, `MQTT_DEVICE_SERVICE_PASS`, `DEVICE_MQTT_PUBLIC_HOST=mqtt.DOMINIO`, `https://DOMINIO` como origen y URL
-   pública, correo, Google, VAPID, Expo). `chmod 600 .env.prod`.
+   pública, correo, Google, VAPID, Expo; cómo obtener cada uno está en "Variables de entorno").
+   `chmod 600 .env.prod`.
 7. **Arranque**: `docker compose -f docker-compose.prod.yml --env-file .env.prod up -d --build`
 8. **Primer administrador**: registra la cuenta en la web y `./make-admin.sh --prod correo@ejemplo.com`.
 9. **Respaldo diario**: `deploy/backup-mysql.sh` en el cron de root.
@@ -221,15 +372,6 @@ repositorio `en-monitor-device-service` debe tener ya su `Dockerfile` en `main`.
 3. Los changesets `device-001` a `device-008` ya aplicados por el backend se reconocen en
    `DATABASECHANGELOG`; solo se crea `device_outbox`. Los módulos siguen con su `device_code` y su
    API key: la tabla es la misma y no hace falta volver a vincularlos.
-
-Claves VAPID para push en el navegador (una vez por entorno; cambiarlas invalida las suscripciones):
-
-```bash
-openssl ecparam -name prime256v1 -genkey -noout -out vapid.pem
-echo "NOTIFICATION_VAPID_PRIVATE_KEY=$(openssl ec -in vapid.pem -outform DER | tail -c +8 | head -c 32 | base64 -w0 | tr '+/' '-_' | tr -d '=')"
-echo "NOTIFICATION_VAPID_PUBLIC_KEY=$(openssl ec -in vapid.pem -pubout -outform DER | tail -c 65 | base64 -w0 | tr '+/' '-_' | tr -d '=')"
-rm vapid.pem
-```
 
 ## CI/CD con GitHub Actions
 
@@ -318,7 +460,9 @@ Con la pila completa arriba y los cuatro servicios `(healthy)`:
 ./e2e/device-flow.sh
 ```
 
-Crea una cuenta y un hogar de prueba (`e2e-*@example.com`) y recorre lo que cruza los servicios:
+Crea una cuenta (`MAIL_USERNAME` con el sufijo `+e2e-…`, porque el registro exige un dominio que
+reciba correo) y un hogar de prueba; comprueba que sin verificar el correo el
+login responde 403 y marca la dirección como verificada en la base. Luego recorre lo que cruza los servicios:
 rutas del gateway, vincular un módulo (el servicio de dispositivos pregunta al backend), el broker
 autenticando contra `device:8084` (clave correcta e incorrecta), telemetría (`ONLINE` en el servicio
 de dispositivos y la lectura guardada en el backend), estado `offline` (evento
@@ -331,6 +475,10 @@ Publicar telemetría de prueba requiere un dispositivo aprovisionado (su `device
 o las credenciales del backend con ACL de publicación; el broker **no** acepta clientes anónimos.
 
 ## Solución de problemas
+
+- **`required variable X is missing a value: X is required`** al levantar la pila: `X` está vacía
+  en `infra/.env`, o falta su línea. Rellénala (sección "Variables de entorno") y repite
+  `docker compose config -q` hasta que no nombre ninguna.
 
 - **`ERROR 1045 ... Access denied for user 'root'@'localhost'`** al usar `docker exec ... mysql -u root -p`:
   la contraseña de `root` es la de `MYSQL_ROOT_PASSWORD` en `.env`. Usa la variable, no la escribas a mano:
@@ -378,12 +526,16 @@ o las credenciales del backend con ACL de publicación; el broker **no** acepta 
 
 - **El servicio de seguridad queda `unhealthy` con RabbitMQ arriba:** `RABBITMQ_USERNAME` /
   `RABBITMQ_PASSWORD` no coinciden con el usuario que RabbitMQ creó la primera vez que arrancó su
-  volumen. Cámbialo dentro (`docker compose exec rabbitmq rabbitmqctl change_password ...`) o
-  borra el volumen `rabbitmq-data` (se pierden los mensajes pendientes).
+  volumen. Cámbiala dentro con el comando de "Valores que guarda un volumen", o borra el volumen
+  `rabbitmq-data` (se pierden los mensajes pendientes).
 
 ## Notas
 
 - **Secretos**: `.env`, `.env.prod`, `keys/` y `mosquitto/certs/` están en `.gitignore`; no se versionan.
+- **Sesión de la web**: los tokens viajan en cookies HttpOnly que pone el servicio de seguridad
+  (ver su README, "Sessions"). `docker-compose.yml` las deja sin `Secure` porque la pila local se
+  sirve por `http://`; `docker-compose.prod.yml` las marca `Secure` (el sitio va por HTTPS). En
+  modo desarrollo el `.env` del servicio de seguridad lleva `SECURITY_SESSION_COOKIE_SECURE=false`.
   `INTERNAL_API_TOKEN` y `RABBITMQ_PASSWORD` son los mismos en todos los servicios: en la pila los toma
   cada contenedor de este `.env`.
 - **Producción**: en un servidor se usa `docker-compose.prod.yml` (sección "Producción"), no la

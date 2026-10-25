@@ -7,7 +7,7 @@
 #
 # Recorre lo que cruza los servicios: cuenta (security) -> hogar (backend) -> vincular un modulo
 # (device, que pregunta al backend) -> el modulo entra al broker (Mosquitto pregunta a device) ->
-# telemetria (device la marca ONLINE, el backend guarda la lectura) -> estado offline (evento
+# telemetria (device la marca ONLINE, mediciones guarda la lectura) -> estado offline (evento
 # device.connectivity-lost -> alerta CONNECTIVITY en el backend) -> borrar el hogar (home.deleted
 # -> device desvincula el modulo). Tambien comprueba lo que debe rechazarse.
 #
@@ -87,13 +87,13 @@ if mqtt_pub "$code" "clave-incorrecta" "$topic/telemetry" '{}' 2>/dev/null; then
 if mqtt_pub "$code" "$api_key" "energy-monitor/devices/OTRO000001/telemetry" '{}' 2>/dev/null; then
   ok "publicar en un topic ajeno no rompe la conexion (la ACL lo descarta)"; else ok "topic ajeno rechazado"; fi
 
-echo "5. Telemetria: device la marca ONLINE y el backend guarda la lectura"
+echo "5. Telemetria: device la marca ONLINE y mediciones guarda la lectura"
 now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 mqtt_pub "$code" "$api_key" "$topic/telemetry" \
   "{\"deviceId\":\"$device\",\"dateTime\":\"$now\",\"voltage\":120.1,\"current\":1.2,\"activePower\":140.5,\"storedEnergy\":0.5,\"frequency\":60,\"powerFactor\":0.95,\"rssi\":-60,\"sequence\":1}" \
   && ok "telemetria aceptada por el broker" || bad "telemetria rechazada por el broker"
 eventually "estado ONLINE (device)" ONLINE bash -c "curl -fsS -H 'Authorization: Bearer $token' '$API/homes/$home/devices' | jq -r '.[0].status'"
-eventually "lectura guardada (backend)" 140.5 bash -c "curl -fsS -H 'Authorization: Bearer $token' '$API/measurements/latest?deviceId=$device' | jq -r .activePower"
+eventually "lectura guardada (mediciones)" 140.5 bash -c "curl -fsS -H 'Authorization: Bearer $token' '$API/measurements/latest?deviceId=$device' | jq -r .activePower"
 
 echo "6. Estado offline: device.connectivity-lost -> alerta en el backend"
 mqtt_pub "$code" "$api_key" "$topic/status" "{\"deviceId\":\"$device\",\"status\":\"offline\"}" \

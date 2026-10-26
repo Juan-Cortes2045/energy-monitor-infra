@@ -121,9 +121,6 @@ services:
       INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:?INTERNAL_API_TOKEN is required}
       # Antes de borrar una cuenta pregunta al servicio de hogares si puede (deletion-check).
       HOME_SERVICE_URL: http://home:8086
-      # Solo para una imagen anterior a la que pregunta al servicio de hogares; se quita cuando el
-      # backend deje de servir los hogares.
-      BACKEND_INTERNAL_URL: http://backend:8083
     volumes:
       - ./keys:/run/keys:ro
     healthcheck:
@@ -158,9 +155,6 @@ services:
       INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:?INTERNAL_API_TOKEN is required}
       # Pregunta al servicio de hogares si quien llama es miembro o dueño del hogar.
       HOME_SERVICE_URL: http://home:8086
-      # Solo para una imagen anterior a la que pregunta al servicio de hogares; se quita cuando el
-      # backend deje de servir los hogares.
-      BACKEND_INTERNAL_URL: http://backend:8083
       RABBITMQ_HOST: rabbitmq
       RABBITMQ_USERNAME: ${RABBITMQ_USERNAME:-energy-monitor}
       RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:?RABBITMQ_PASSWORD is required}
@@ -218,9 +212,6 @@ services:
       # servicio de dispositivos de que hogar es cada modulo.
       HOME_SERVICE_URL: http://home:8086
       DEVICE_SERVICE_URL: http://device:8084
-      # Solo para una imagen anterior a la que pregunta al servicio de hogares; se quita cuando el
-      # backend deje de servir los hogares.
-      BACKEND_INTERNAL_URL: http://backend:8083
       RABBITMQ_HOST: rabbitmq
       RABBITMQ_USERNAME: ${RABBITMQ_USERNAME:-energy-monitor}
       RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:?RABBITMQ_PASSWORD is required}
@@ -271,11 +262,12 @@ services:
       RABBITMQ_HOST: rabbitmq
       RABBITMQ_USERNAME: ${RABBITMQ_USERNAME:-energy-monitor}
       RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:?RABBITMQ_PASSWORD is required}
-      # Apagados mientras el backend tenga su modulo de hogares: el relay del backend publica la
-      # tabla home_outbox (compartida, tambien las filas de este servicio) y su cola recibe
-      # account.deleted. Se encienden los dos cuando el backend deje de servir los hogares.
-      HOME_OUTBOX_RELAY_ENABLED: ${HOME_OUTBOX_RELAY_ENABLED:-false}
-      ACCOUNT_DELETED_CONSUMER_ENABLED: ${ACCOUNT_DELETED_CONSUMER_ENABLED:-false}
+      # Publica home.deleted desde su outbox (el servicio de dispositivos desvincula los modulos) y
+      # limpia los hogares y las membresias de las cuentas borradas (account.deleted). El backend ya
+      # no tiene modulo de hogares: este servicio es el unico que lo hace. En false solo para
+      # volver atras a un backend que aun lo tenga.
+      HOME_OUTBOX_RELAY_ENABLED: ${HOME_OUTBOX_RELAY_ENABLED:-true}
+      ACCOUNT_DELETED_CONSUMER_ENABLED: ${ACCOUNT_DELETED_CONSUMER_ENABLED:-true}
     volumes:
       - ./keys/public.pem:/run/keys/public.pem:ro
     healthcheck:
@@ -320,7 +312,7 @@ services:
       # Lee los niveles de consumo y la energia del servicio de mediciones, y oye cada lectura por
       # RabbitMQ para las alertas. No se conecta al broker MQTT.
       MEASUREMENT_SERVICE_URL: http://measurement:8085
-      # El cliente del servicio de hogares (sin uso mientras el backend tenga su modulo de hogares).
+      # Lee los hogares, sus miembros y sus limites (con cache) del servicio de hogares.
       HOME_SERVICE_URL: http://home:8086
       NOTIFICATION_WEB_URL: ${NOTIFICATION_WEB_URL:-http://localhost}
       NOTIFICATION_VAPID_PUBLIC_KEY: ${NOTIFICATION_VAPID_PUBLIC_KEY:-}

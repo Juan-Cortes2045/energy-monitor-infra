@@ -10,7 +10,7 @@
 #
 # Servicios y puertos publicados:
 #   80    frontend (nginx): sirve la web y reenvia /api/ al API gateway (mismo origen, sin CORS).
-#         La app movil en la LAN usa esta misma direccion: http://<IP de LAN>
+#   8080  API gateway, para la app movil en la LAN: http://<IP de LAN>:8080
 #   8883  MQTT sobre TLS, para los dispositivos ESP32
 #   1883  MQTT sin TLS, solo en 127.0.0.1
 #   3306  MySQL, solo en 127.0.0.1 [para depurar desde este PC]
@@ -18,9 +18,9 @@
 #
 # El gateway es la unica entrada de la API: reenvia /api/v1/auth/** y /api/v1/admin/users|roles/**
 # al servicio de seguridad (8082), /api/v1/homes/*/devices/** y /api/v1/appliance-types/** al
-# servicio de dispositivos (8084) y el resto de /api/v1/** a energy-monitor-backend (8083). Ni los
-# servicios ni el gateway publican puertos: solo se alcanzan por la red de Docker, asi que
-# /internal/** nunca queda expuesto.
+# servicio de dispositivos (8084) y el resto de /api/v1/** a energy-monitor-backend (8083). Los
+# servicios no publican puertos: solo se alcanzan por la red de Docker, asi que /internal/** nunca
+# queda expuesto. El gateway publica 8080 para la app movil y rechaza /internal/**.
 #
 # La integracion MQTT ya esta hecha en el codigo: el broker delega la autenticacion de cada
 # cliente en el servicio de dispositivos (POST /internal/mqtt/auth/user y /acl). Aqui solo se
@@ -252,6 +252,9 @@ services:
       SECURITY_SERVICE_URL: http://security:8082
       DEVICE_SERVICE_URL: http://device:8084
       BACKEND_URL: http://backend:8083
+    ports:
+      # La app movil (APK) en la LAN llama directo al gateway: http://<IP de LAN>:8080
+      - "8080:8080"
     volumes:
       - ./keys/public.pem:/run/keys/public.pem:ro
     healthcheck:

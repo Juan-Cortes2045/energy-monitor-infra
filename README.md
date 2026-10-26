@@ -28,8 +28,9 @@ red Docker: energy-monitor
                                          ├─ /api/v1/notifications/**, /admin/notifications ──► notification :8087
                                          └─ resto de /api/v1/** ────────────────────────────► backend  :8083
 
-  security :8082 ◄── /internal/** (INTERNAL_API_TOKEN) ──► backend :8083 ◄──► device :8084
-  measurement :8085 ◄── /internal/** ──► backend :8083 y device :8084
+  backend :8083 ── /internal/** (INTERNAL_API_TOKEN) ──► device :8084, measurement :8085 y home :8086
+  measurement :8085 ◄── /internal/** ──► device :8084
+  backend :8083 ── alert.raised, recommendation.created (rabbitmq) ──► notification :8087
   home :8086 ◄── /internal/homes/**, /internal/accounts/** ── security, device, measurement, backend
   home :8086 ── /internal/users/profiles ──► security :8082
   notification :8087 ── /internal/** ──► security :8082, home :8086 y device :8084
@@ -178,10 +179,10 @@ Ninguno se versiona. En todos:
 | `MAIL_HOST`, `MAIL_PORT`                                              | no          | `smtp.gmail.com` y `587`.                                                                                                                                                                                                              |
 | `MAIL_USERNAME`, `MAIL_PASSWORD`, `MAIL_FROM`                         | no          | La cuenta de Gmail y su contraseña de aplicación (ver abajo). En `MAIL_FROM`: `EnergyMonitor <esa cuenta>`. Sin ellas no salen los correos de verificación, recuperación ni alertas.                                                   |
 | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `VITE_GOOGLE_CLIENT_ID`   | no          | El cliente OAuth de Google (ver abajo). `VITE_GOOGLE_CLIENT_ID` lleva el mismo ID. Si están vacías, no aparece el botón de Google.                                                                                                     |
-| `NOTIFICATION_VAPID_PUBLIC_KEY`, `NOTIFICATION_VAPID_PRIVATE_KEY`     | no          | Comandos de abajo, una vez por entorno. Las reciben el backend y el servicio de notificaciones: no las cambies, o cada navegador suscrito deja de recibir push. Si están vacías, no hay notificaciones push en el navegador.            |
+| `NOTIFICATION_VAPID_PUBLIC_KEY`, `NOTIFICATION_VAPID_PRIVATE_KEY`     | no          | Comandos de abajo, una vez por entorno. Las recibe el servicio de notificaciones: no las cambies, o cada navegador suscrito deja de recibir push. Si están vacías, no hay notificaciones push en el navegador.            |
 | `EXPO_ACCESS_TOKEN`                                                   | no          | En expo.dev: _Account settings → Access tokens → Create token_. Si está vacía, no hay push en la app móvil. Va solo en el servidor, nunca en la app.                                                                                   |
 | `HOME_OUTBOX_RELAY_ENABLED`, `ACCOUNT_DELETED_CONSUMER_ENABLED`       | no          | `true` (por defecto). `false` solo para volver atrás a un backend que aún tenga su módulo de hogares (ver "Servicio de hogares").                                                                                                       |
-| `SECURITY_EVENTS_CONSUMER_ENABLED`, `ALERT_EVENTS_CONSUMER_ENABLED`, `ALERT_OUTBOX_RELAY_ENABLED` | no | `false` (por defecto) mientras el backend tenga su módulo de notificaciones. Se encienden los tres juntos al retirarlo (ver "Servicio de notificaciones").                                                                  |
+| `SECURITY_EVENTS_CONSUMER_ENABLED`, `ALERT_EVENTS_CONSUMER_ENABLED`, `ALERT_OUTBOX_RELAY_ENABLED` | no | `true` (por defecto). `false` solo para volver atrás a un backend que aún tenga su módulo de notificaciones (ver "Servicio de notificaciones").                                                                                |
 | `*_CONTEXT`                                                           | no          | Solo si los repositorios no están clonados uno al lado del otro (ver "Requisitos").                                                                                                                                                    |
 
 **Contraseña de aplicación de Gmail** (`MAIL_PASSWORD`). Tu contraseña normal de Gmail no sirve
@@ -246,7 +247,7 @@ Cada servicio que corre en el PC lee el `.env` de su carpeta, copiado de su `.en
 | `backend/en-monitor-measurement-service/.env` | `MYSQL_PASSWORD`, `RABBITMQ_*`, `INTERNAL_API_TOKEN`, `MQTT_MEASUREMENT_SERVICE_USER/PASS`                                                             | `SECURITY_JWT_PUBLIC_KEY_PATH`, `MEASUREMENT_MQTT_ENABLED=true`                                                                                                                              |
 | `backend/en-monitor-home-service/.env`        | `MYSQL_PASSWORD`, `RABBITMQ_*`, `INTERNAL_API_TOKEN`                                                                                                   | `SECURITY_JWT_PUBLIC_KEY_PATH`, `SECURITY_SERVICE_URL=http://localhost:8082`                                                                                                                 |
 | `backend/en-monitor-notification-service/.env` | `MYSQL_PASSWORD`, `MAIL_*`, `RABBITMQ_*`, `INTERNAL_API_TOKEN`, VAPID, `EXPO_ACCESS_TOKEN`                                                            | `SECURITY_JWT_PUBLIC_KEY_PATH`, `NOTIFICATION_WEB_URL=http://localhost:5173`, `SECURITY_SERVICE_URL`, `HOME_SERVICE_URL`, `DEVICE_SERVICE_URL` (los de `localhost`)                           |
-| `backend/energy-monitor-backend/.env`         | `MYSQL_PASSWORD`, `MAIL_*`, `RABBITMQ_*`, `INTERNAL_API_TOKEN`, VAPID, `EXPO_ACCESS_TOKEN`                                                             | `SECURITY_JWT_PUBLIC_KEY_PATH`, `NOTIFICATION_WEB_URL=http://localhost:5173`, `MEASUREMENT_SERVICE_URL=http://localhost:8085`                                                                |
+| `backend/energy-monitor-backend/.env`         | `MYSQL_PASSWORD`, `RABBITMQ_*`, `INTERNAL_API_TOKEN`                                                                                                   | `SECURITY_JWT_PUBLIC_KEY_PATH`, `MEASUREMENT_SERVICE_URL=http://localhost:8085`                                                                                                              |
 | `backend/en-monitor-api-gateway/.env`         | —                                                                                                                                                      | `SECURITY_JWT_PUBLIC_KEY_PATH`, `SECURITY_CORS_ALLOWED_ORIGINS=http://localhost:5173`                                                                                                        |
 | `frontend/energy-monitor-web/.env.local`      | `VITE_GOOGLE_CLIENT_ID`                                                                                                                                | Nada más: Vite reenvía `/api` al gateway de `:8080` (otro puerto: `VITE_DEV_API_TARGET`)                                                                                                     |
 | `frontend/energy-monitor-mobile/.env`         | —                                                                                                                                                      | `EXPO_PUBLIC_API_BASE_URL`: `http://<IP de LAN>:8080` en modo desarrollo o `http://<IP de LAN>` con la pila completa. `EXPO_PUBLIC_EAS_PROJECT_ID`: expo.dev → proyecto → _Project settings_ |
@@ -473,12 +474,13 @@ seguridad (nombres, correos, administradores y el permiso `USER.READ`), a hogare
 nombre de un hogar) y a dispositivos (nombre de un dispositivo). Usa las tablas `notification`,
 `notification_preference`, `push_subscription` y `push_device` de la base compartida.
 
-Recibe las mismas variables de correo, `NOTIFICATION_WEB_URL`, las llaves VAPID y
-`EXPO_ACCESS_TOKEN` que el backend. **Las llaves VAPID deben ser las mismas**: cada navegador
+Recibe las variables de correo, `NOTIFICATION_WEB_URL`, las llaves VAPID y `EXPO_ACCESS_TOKEN`
+(el backend ya no las usa). **Las llaves VAPID deben ser las que tenía el backend**: cada navegador
 liga su suscripción a la pública, y con otras dejaría de recibir push.
 
-Tres interruptores, apagados por defecto mientras el backend tenga su módulo de notificaciones,
-que hace lo mismo en proceso:
+Es el único que atiende los eventos de cuenta y los códigos de correo y que entrega las alertas y
+recomendaciones: el backend ya no tiene módulo de notificaciones. Tres interruptores, encendidos por
+defecto; en `false` solo sirven para volver atrás a un backend que aún tenga el módulo:
 
 | Variable | Servicio | Qué enciende |
 |---|---|---|
@@ -486,9 +488,8 @@ que hace lo mismo en proceso:
 | `ALERT_EVENTS_CONSUMER_ENABLED` | notification | Colas `notification-service.notification.alert-raised` y `.recommendation-created`: entrega de alertas y recomendaciones |
 | `ALERT_OUTBOX_RELAY_ENABLED` | backend | Publica `alert.raised` y `recommendation.created` desde `backend_outbox` |
 
-Apagados, el servicio ya responde sus rutas (lee y escribe las mismas tablas que el backend) pero no
-consume nada, y el backend guarda sus eventos en `backend_outbox` sin publicarlos. Se encienden
-los tres juntos en el despliegue que retira el módulo del backend.
+Con el relay apagado el backend guarda sus eventos en `backend_outbox` sin publicarlos, y los
+publica en orden cuando se enciende.
 
 **Primer despliegue con el servicio de notificaciones:** el contenedor `notification` debe estar
 arriba **antes** que el gateway con las rutas nuevas; si no, esas rutas responden 503.
@@ -502,6 +503,43 @@ arriba **antes** que el gateway con las rutas nuevas; si no, esas rutas responde
    reconocen en `DATABASECHANGELOG` y no se ejecuta ninguno.
 4. `deploy/deploy.sh backend`, con el outbox (changeset `outbox-001`, relay apagado), y después
    `deploy/deploy.sh gateway`, con las rutas al servicio.
+
+**Corte desde ese despliegue** (el servicio de notificaciones con los interruptores apagados y el
+backend con su módulo de notificaciones):
+
+1. Respaldo de MySQL (`deploy/backup-mysql.sh`).
+2. Descarta las alertas y recomendaciones que el backend guardó en el outbox mientras las entregaba
+   él mismo; si no, el servicio las enviaría otra vez:
+
+   ```bash
+   docker compose -f docker-compose.prod.yml --env-file .env.prod exec mysql \
+     sh -c 'mysql -uroot -p"$MYSQL_ROOT_PASSWORD" energy_monitor -e "UPDATE backend_outbox SET discarded_at = NOW() WHERE published_at IS NULL AND discarded_at IS NULL"'
+   ```
+
+3. `deploy/deploy.sh infra`: recrea `notification` con los consumidores encendidos y el backend
+   con el relay encendido, sin las variables de correo, push y `SECURITY_SERVICE_URL`.
+4. Enseguida `deploy/deploy.sh backend`, con el backend sin módulo de notificaciones. Entre los dos
+   pasos el backend todavía entrega en proceso y el servicio también: un código de correo no sale
+   dos veces (el id del mensaje es el id del envío en la tabla compartida), pero una alerta o una
+   notificación de administrador de ese intervalo puede llegar dos veces. El orden inverso dejaría
+   ese intervalo sin códigos ni alertas.
+5. Las colas del backend ya no tienen consumidor y se llenarían con cada evento de cuenta: bórralas.
+   El servicio recibe los mismos mensajes en las suyas.
+
+   ```bash
+   for q in energy-monitor-backend.notification.account-events energy-monitor-backend.notification.mail; do
+     for s in "" .dlq; do
+       docker compose -f docker-compose.prod.yml --env-file .env.prod exec rabbitmq \
+         rabbitmqctl delete_queue "$q$s"
+     done
+   done
+   ```
+
+6. Si habías puesto `SECURITY_EVENTS_CONSUMER_ENABLED`, `ALERT_EVENTS_CONSUMER_ENABLED` o
+   `ALERT_OUTBOX_RELAY_ENABLED` en `false` en `.env.prod`, bórralos.
+
+**Volver atrás** a un backend con módulo de notificaciones: pon los tres interruptores en `false`
+en `.env.prod`, `deploy/deploy.sh infra` y despliega esa versión del backend.
 
 ## CI/CD con GitHub Actions
 

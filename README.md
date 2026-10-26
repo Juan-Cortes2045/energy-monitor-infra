@@ -28,8 +28,9 @@ red Docker: energy-monitor
   device (conectividad, comandos) y backend (lecturas) ──► mosquitto :1883
 ```
 
-Solo se publican la web (`:80`), MQTT TLS (`:8883`) y, en `127.0.0.1`, MySQL, AMQP, la consola de
-RabbitMQ y MQTT sin TLS. El gateway y los tres servicios solo se alcanzan por la red de Docker: `/internal/**` nunca queda expuesto.
+Solo se publican la web (`:80`), el gateway para la app móvil (`:8080`), MQTT TLS (`:8883`) y, en
+`127.0.0.1`, MySQL, AMQP, la consola de RabbitMQ y MQTT sin TLS. Los tres servicios solo se
+alcanzan por la red de Docker y el gateway rechaza `/internal/**`: nunca queda expuesto.
 
 ## Requisitos
 
@@ -91,8 +92,10 @@ docker compose ps         # gateway, security, device y backend deben quedar (he
 ```
 
 Luego abre <http://localhost>. La API responde en el mismo origen, <http://localhost/api/v1/...>,
-a través del gateway; la app móvil en la LAN usa `http://<IP de LAN>` como
-`EXPO_PUBLIC_API_BASE_URL`. La consola de RabbitMQ está en <http://localhost:15672>
+a través del gateway; la app móvil (APK) en la LAN llama directo al gateway con
+`EXPO_PUBLIC_API_BASE_URL=http://<IP de LAN>:8080` (la misma IP que `DEVICE_MQTT_PUBLIC_HOST`;
+en Windows, permite el puerto 8080 en el firewall para redes privadas). La consola de RabbitMQ
+está en <http://localhost:15672>
 (`RABBITMQ_USERNAME` / `RABBITMQ_PASSWORD`). Swagger de cada servicio: en modo desarrollo
 (`http://localhost:8082/swagger-ui.html`, `:8084` y `:8083`), porque en la pila completa no publican puertos.
 
@@ -277,14 +280,18 @@ El código de los servicios ya trae la integración; infra solo conecta las piez
 | Puerto | Servicio | Para qué |
 |---|---|---|
 | 80 | frontend (nginx) | La web; reenvía `/api/` al gateway. |
+| 8080 | gateway | La API para la app móvil en la LAN (`http://<IP de LAN>:8080`). |
 | 8883 | mosquitto | MQTT sobre TLS, para los dispositivos. |
 | 1883 | mosquitto | MQTT sin TLS, solo en `127.0.0.1`. |
 | 3306 | mysql | Base de datos, solo en `127.0.0.1` (para depurar desde este PC). |
 | 5672 | rabbitmq | AMQP, solo en `127.0.0.1` (servicios del PC en modo desarrollo). |
 | 15672 | rabbitmq | Consola web, solo en `127.0.0.1`. |
 
-El gateway (8080), el servicio de seguridad (8082), el backend (8083) y el servicio de dispositivos
-(8084) no publican puertos en la pila completa.
+El servicio de seguridad (8082), el backend (8083) y el servicio de dispositivos (8084) no publican
+puertos en la pila completa. El gateway (8080) sí, solo en la pila local y para la app móvil: ahí
+los clientes de la LAN llegan sin el nginx delante y el gateway puede verlos con la IP del puente
+de Docker, así que confiaría en un `X-Forwarded-For` enviado por el cliente (límite de intentos).
+En producción no se publica: la app usa `https://DOMINIO`.
 
 ## Comandos útiles
 

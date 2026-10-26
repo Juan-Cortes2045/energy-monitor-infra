@@ -18,6 +18,10 @@
 # Not used in production: there the broker uses a Let's Encrypt certificate.
 set -euo pipefail
 
+# Git Bash on Windows rewrites arguments that look like paths: "/O=.../CN=..." would reach
+# openssl as "C:/Program Files/Git/O=...". Elsewhere the variable does nothing.
+export MSYS_NO_PATHCONV=1
+
 here="$(cd "$(dirname "$0")" && pwd)"
 certs="$here/certs"
 # The firmware lives in the backend repository, cloned next to infra (see infra/README.md).
@@ -29,16 +33,21 @@ if [[ ! -f ca.key || ! -f ca.crt ]]; then
   echo "Creating the development CA..."
   openssl req -x509 -newkey rsa:2048 -nodes -sha256 -days 3650 \
     -subj "/O=EnergyMonitor Dev/CN=EnergyMonitor Dev CA" \
-    -keyout ca.key -out ca.crt 2>/dev/null
+    -keyout ca.key -out ca.crt
 fi
 
-# LAN IPv4 addresses: `hostname -I` on Linux, ipconfig on macOS.
+# LAN IPv4 addresses: `hostname -I` on Linux, ipconfig on macOS, PowerShell on Windows (Git
+# Bash). Windows ipconfig ignores "getifaddr" and prints an error to stdout, which would end up
+# in the certificate, so each system gets its own command.
 lan_ips() {
-  if hostname -I >/dev/null 2>&1; then
-    hostname -I
-  else
-    for iface in en0 en1; do ipconfig getifaddr "$iface" 2>/dev/null || true; done
-  fi
+  case "$(uname -s)" in
+    Linux*)  hostname -I 2>/dev/null || true ;;
+    Darwin*) for iface in en0 en1; do ipconfig getifaddr "$iface" 2>/dev/null || true; done ;;
+    MINGW*|MSYS*|CYGWIN*)
+      powershell.exe -NoProfile -Command \
+        "(Get-NetIPAddress -AddressFamily IPv4 | Where-Object { \$_.IPAddress -notmatch '^(127|169\.254)\.' }).IPAddress" \
+        2>/dev/null | tr -d '\r' || true ;;
+  esac
 }
 
 san="DNS:localhost,DNS:$(hostname),IP:127.0.0.1"
@@ -53,11 +62,13 @@ done
 echo "Issuing the broker certificate for: $san"
 openssl req -newkey rsa:2048 -nodes -sha256 \
   -subj "/O=EnergyMonitor Dev/CN=energy-monitor-mqtt" \
-  -keyout server.key -out server.csr 2>/dev/null
+  -keyout server.key -out server.csr
+# A real file, not <(printf ...): the Windows build of openssl cannot open the pipe that process
+# substitution hands it (/proc/<pid>/fd/63).
+printf "subjectAltName=%s\nextendedKeyUsage=serverAuth\nbasicConstraints=CA:FALSE\n" "$san" > server.ext
 openssl x509 -req -in server.csr -CA ca.crt -CAkey ca.key -CAcreateserial \
-  -days 825 -sha256 -out server.crt \
-  -extfile <(printf "subjectAltName=%s\nextendedKeyUsage=serverAuth\nbasicConstraints=CA:FALSE\n" "$san") 2>/dev/null
-rm -f server.csr
+  -days 825 -sha256 -out server.crt -extfile server.ext
+rm -f server.csr server.ext
 
 # The container runs as uid 1000 (the mosquitto user of the image).
 chmod 644 ca.crt server.crt

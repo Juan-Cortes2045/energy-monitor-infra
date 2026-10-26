@@ -9,10 +9,10 @@
 #   8883  MQTT sobre TLS, para los dispositivos (internet)
 #   WEB_PORT (8081) en 127.0.0.1: la web y la API. Delante va un proxy HTTPS (Caddy/nginx)
 #         que reenvia TODO el dominio aqui; el nginx del frontend solo pasa /api/ al API
-#         gateway, que reparte entre el servicio de seguridad, el de dispositivos y el backend
-#         y rechaza /internal/**.
+#         gateway, que reparte entre los servicios de seguridad, dispositivos y mediciones y el
+#         backend, y rechaza /internal/**.
 #   15672 consola de RabbitMQ en 127.0.0.1, para abrirla con un tunel SSH
-# El gateway, los tres servicios, MySQL, AMQP y el listener MQTT sin TLS (1883) quedan dentro de
+# El gateway, los cuatro servicios, MySQL, AMQP y el listener MQTT sin TLS (1883) quedan dentro de
 # la red de Docker. deploy/deploy.sh comprueba su salud con el healthcheck de cada contenedor.
 #
 # El mosquitto.conf es el mismo que en desarrollo; aqui "device" es el contenedor.
@@ -81,6 +81,8 @@ services:
       SECURITY_JWT_PRIVATE_KEY_PATH: /run/keys/private.pem
       SECURITY_JWT_PUBLIC_KEY_PATH: /run/keys/public.pem
       SECURITY_RESET_PEPPER: ${SECURITY_RESET_PEPPER:?SECURITY_RESET_PEPPER is required}
+      # Cookies HttpOnly de la sesión web con Secure: el sitio se sirve por HTTPS.
+      SECURITY_SESSION_COOKIE_SECURE: "true"
       GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
       GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
       RABBITMQ_HOST: rabbitmq
@@ -125,9 +127,9 @@ services:
       MQTT_BROKER_URL: tcp://mosquitto:1883
       MQTT_DEVICE_SERVICE_USER: ${MQTT_DEVICE_SERVICE_USER:-em-device-service}
       MQTT_DEVICE_SERVICE_PASS: ${MQTT_DEVICE_SERVICE_PASS:?MQTT_DEVICE_SERVICE_PASS is required}
-      # Las credenciales que el broker acepta para el backend.
-      MQTT_BACKEND_USER: ${MQTT_BACKEND_USER:-em-backend}
-      MQTT_BACKEND_PASS: ${MQTT_BACKEND_PASS:?MQTT_BACKEND_PASS is required}
+      # Las credenciales que el broker acepta para el servicio de mediciones (solo lee la telemetria).
+      MQTT_MEASUREMENT_SERVICE_USER: ${MQTT_MEASUREMENT_SERVICE_USER:-em-measurement-service}
+      MQTT_MEASUREMENT_SERVICE_PASS: ${MQTT_MEASUREMENT_SERVICE_PASS:?MQTT_MEASUREMENT_SERVICE_PASS is required}
       # Solo la red interna de Docker puede llamar a /internal/mqtt/auth/**.
       MQTT_AUTH_ALLOWED_NETWORKS: 172.16.0.0/12,127.0.0.1/32
       # Direccion del broker que la web escribe al modulo al vincularlo por Bluetooth.
@@ -137,6 +139,46 @@ services:
       - ${JWT_KEYS_DIR:?JWT_KEYS_DIR is required}/public.pem:/run/keys/public.pem:ro
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8084/actuator/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 120s
+    stop_grace_period: 30s
+    restart: unless-stopped
+
+  # Mediciones: guarda la telemetria de los modulos y sirve el historial, el consumo de un hogar
+  # y los niveles de consumo; anuncia cada lectura al backend. Solo recibe public.pem.
+  measurement:
+    build:
+      context: ${MEASUREMENT_CONTEXT:-../backend/en-monitor-measurement-service}
+    depends_on:
+      mysql:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    environment:
+      # Cualquier perfil distinto de "local" (el de application-local.yaml).
+      SPRING_PROFILES_ACTIVE: prod
+      # La misma base que los otros servicios: aplica solo los changesets measurement-*.
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/energy_monitor?connectionTimeZone=UTC&forceConnectionTimeZoneToSession=true
+      SPRING_DATASOURCE_USERNAME: energy_app
+      SPRING_DATASOURCE_PASSWORD: ${MYSQL_PASSWORD:?MYSQL_PASSWORD is required}
+      SECURITY_JWT_PUBLIC_KEY_PATH: /run/keys/public.pem
+      INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:?INTERNAL_API_TOKEN is required}
+      BACKEND_INTERNAL_URL: http://backend:8083
+      DEVICE_SERVICE_URL: http://device:8084
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_USERNAME: ${RABBITMQ_USERNAME:-energy-monitor}
+      RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:?RABBITMQ_PASSWORD is required}
+      # Unico que guarda las lecturas: se suscribe a la telemetria por el listener interno.
+      MQTT_BROKER_URL: tcp://mosquitto:1883
+      MQTT_MEASUREMENT_SERVICE_USER: ${MQTT_MEASUREMENT_SERVICE_USER:-em-measurement-service}
+      MQTT_MEASUREMENT_SERVICE_PASS: ${MQTT_MEASUREMENT_SERVICE_PASS:?MQTT_MEASUREMENT_SERVICE_PASS is required}
+      MEASUREMENT_MQTT_ENABLED: "true"
+    volumes:
+      - ${JWT_KEYS_DIR:?JWT_KEYS_DIR is required}/public.pem:/run/keys/public.pem:ro
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8085/actuator/health"]
       interval: 10s
       timeout: 5s
       retries: 6
@@ -172,10 +214,8 @@ services:
       MAIL_FROM: ${MAIL_FROM:-}
       # Lee los dispositivos (con cache) del servicio de dispositivos.
       DEVICE_SERVICE_URL: http://device:8084
-      # Solo lee la telemetria.
-      MQTT_BROKER_URL: tcp://mosquitto:1883
-      MQTT_BACKEND_USER: ${MQTT_BACKEND_USER:-em-backend}
-      MQTT_BACKEND_PASS: ${MQTT_BACKEND_PASS:?MQTT_BACKEND_PASS is required}
+      # Niveles de consumo y energia del servicio de mediciones; cada lectura llega por RabbitMQ.
+      MEASUREMENT_SERVICE_URL: http://measurement:8085
       NOTIFICATION_VAPID_PUBLIC_KEY: ${NOTIFICATION_VAPID_PUBLIC_KEY:-}
       NOTIFICATION_VAPID_PRIVATE_KEY: ${NOTIFICATION_VAPID_PRIVATE_KEY:-}
       # Push a las apps moviles por el relay de Expo. Vacio = push movil desactivado.
@@ -203,6 +243,8 @@ services:
         condition: service_started
       device:
         condition: service_started
+      measurement:
+        condition: service_started
       backend:
         condition: service_started
     environment:
@@ -210,6 +252,7 @@ services:
       SECURITY_CORS_ALLOWED_ORIGINS: ${SECURITY_CORS_ALLOWED_ORIGINS:?SECURITY_CORS_ALLOWED_ORIGINS is required}
       SECURITY_SERVICE_URL: http://security:8082
       DEVICE_SERVICE_URL: http://device:8084
+      MEASUREMENT_SERVICE_URL: http://measurement:8085
       BACKEND_URL: http://backend:8083
     volumes:
       - ${JWT_KEYS_DIR:?JWT_KEYS_DIR is required}/public.pem:/run/keys/public.pem:ro

@@ -104,6 +104,9 @@ services:
       SECURITY_JWT_PRIVATE_KEY_PATH: /run/keys/private.pem
       SECURITY_JWT_PUBLIC_KEY_PATH: /run/keys/public.pem
       SECURITY_RESET_PEPPER: ${SECURITY_RESET_PEPPER:?SECURITY_RESET_PEPPER is required}
+      # La web recibe los tokens en cookies HttpOnly. Esta pila sirve HTTP (http://localhost), así
+      # que sin Secure: con él el navegador las descartaría. En producción (HTTPS) va activado.
+      SECURITY_SESSION_COOKIE_SECURE: "false"
       # Mismo cliente OAuth que el frontend (VITE_GOOGLE_CLIENT_ID). El servicio canjea el
       # codigo de Google, asi que necesita el secreto, que nunca llega al navegador.
       # Vacio en ambos = boton de Google desactivado (503).
@@ -157,9 +160,10 @@ services:
       MQTT_CLIENT_ID: device-service-local
       MQTT_DEVICE_SERVICE_USER: ${MQTT_DEVICE_SERVICE_USER:-em-device-service}
       MQTT_DEVICE_SERVICE_PASS: ${MQTT_DEVICE_SERVICE_PASS:?MQTT_DEVICE_SERVICE_PASS is required}
-      # El broker le pregunta tambien por el backend: estas son las credenciales que acepta para el.
-      MQTT_BACKEND_USER: ${MQTT_BACKEND_USER:-em-backend}
-      MQTT_BACKEND_PASS: ${MQTT_BACKEND_PASS:?MQTT_BACKEND_PASS is required}
+      # El broker le pregunta tambien por el servicio de mediciones: estas son las credenciales que
+      # acepta para el (solo lee la telemetria).
+      MQTT_MEASUREMENT_SERVICE_USER: ${MQTT_MEASUREMENT_SERVICE_USER:-em-measurement-service}
+      MQTT_MEASUREMENT_SERVICE_PASS: ${MQTT_MEASUREMENT_SERVICE_PASS:?MQTT_MEASUREMENT_SERVICE_PASS is required}
       # Solo la red interna de Docker (y loopback) puede llamar a /internal/mqtt/auth/**.
       MQTT_AUTH_ALLOWED_NETWORKS: 172.16.0.0/12,127.0.0.1/32
       # Direccion del broker que la web escribe al modulo al vincularlo por Bluetooth:
@@ -170,6 +174,54 @@ services:
       - ./keys/public.pem:/run/keys/public.pem:ro
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8084/actuator/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 120s
+    # Al parar se desuscribe del broker y cierra las peticiones en curso.
+    stop_grace_period: 30s
+    restart: unless-stopped
+
+  # Mediciones: guarda la telemetria de los modulos y sirve el historial, el consumo de un hogar
+  # y los niveles de consumo; anuncia cada lectura al backend (measurement.recorded). Solo recibe
+  # public.pem.
+  measurement:
+    build:
+      context: ${MEASUREMENT_CONTEXT:-../backend/en-monitor-measurement-service}
+    image: energy-monitor-measurement:local
+    container_name: energy-monitor-measurement
+    depends_on:
+      mysql:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    environment:
+      # Cualquier perfil distinto de "local" (el de application-local.yaml).
+      SPRING_PROFILES_ACTIVE: prod
+      # La misma base que los otros servicios: aplica solo los changesets measurement-*.
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/energy_monitor?connectionTimeZone=UTC&forceConnectionTimeZoneToSession=true
+      SPRING_DATASOURCE_USERNAME: energy_app
+      SPRING_DATASOURCE_PASSWORD: ${MYSQL_PASSWORD:?MYSQL_PASSWORD is required}
+      SECURITY_JWT_PUBLIC_KEY_PATH: /run/keys/public.pem
+      INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:?INTERNAL_API_TOKEN is required}
+      # Pregunta al backend si quien llama es miembro del hogar y sus limites, y al servicio de
+      # dispositivos de que hogar es cada modulo.
+      BACKEND_INTERNAL_URL: http://backend:8083
+      DEVICE_SERVICE_URL: http://device:8084
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_USERNAME: ${RABBITMQ_USERNAME:-energy-monitor}
+      RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:?RABBITMQ_PASSWORD is required}
+      # Se suscribe a la telemetria por el listener interno (1883) de la misma red y guarda cada
+      # lectura. Es el unico que la guarda: el backend ya no se conecta al broker.
+      MQTT_BROKER_URL: tcp://mosquitto:1883
+      MQTT_CLIENT_ID: measurement-service-local
+      MQTT_MEASUREMENT_SERVICE_USER: ${MQTT_MEASUREMENT_SERVICE_USER:-em-measurement-service}
+      MQTT_MEASUREMENT_SERVICE_PASS: ${MQTT_MEASUREMENT_SERVICE_PASS:?MQTT_MEASUREMENT_SERVICE_PASS is required}
+      MEASUREMENT_MQTT_ENABLED: "true"
+    volumes:
+      - ./keys/public.pem:/run/keys/public.pem:ro
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8085/actuator/health"]
       interval: 10s
       timeout: 5s
       retries: 6
@@ -208,11 +260,9 @@ services:
       MAIL_FROM: ${MAIL_FROM:-}
       # Lee los dispositivos (con cache) del servicio de dispositivos.
       DEVICE_SERVICE_URL: http://device:8084
-      # El backend solo lee la telemetria, por el listener interno (1883) de la misma red.
-      MQTT_BROKER_URL: tcp://mosquitto:1883
-      MQTT_BACKEND_USER: ${MQTT_BACKEND_USER:-em-backend}
-      MQTT_BACKEND_PASS: ${MQTT_BACKEND_PASS:?MQTT_BACKEND_PASS is required}
-      MQTT_CLIENT_ID: energy-monitor-backend-local
+      # Lee los niveles de consumo y la energia del servicio de mediciones, y oye cada lectura por
+      # RabbitMQ para las alertas. No se conecta al broker MQTT.
+      MEASUREMENT_SERVICE_URL: http://measurement:8085
       NOTIFICATION_WEB_URL: ${NOTIFICATION_WEB_URL:-http://localhost}
       NOTIFICATION_VAPID_PUBLIC_KEY: ${NOTIFICATION_VAPID_PUBLIC_KEY:-}
       NOTIFICATION_VAPID_PRIVATE_KEY: ${NOTIFICATION_VAPID_PRIVATE_KEY:-}
@@ -226,8 +276,8 @@ services:
       timeout: 5s
       retries: 6
       start_period: 120s
-    # Al parar, el backend se desuscribe del broker y cierra las peticiones en curso; con los
-    # 10 s por defecto Docker lo mataba a mitad (exit 137).
+    # Al parar, el backend cierra las peticiones en curso; con los 10 s por defecto Docker lo
+    # mataba a mitad (exit 137).
     stop_grace_period: 30s
     restart: unless-stopped
 
@@ -242,6 +292,8 @@ services:
         condition: service_started
       device:
         condition: service_started
+      measurement:
+        condition: service_started
       backend:
         condition: service_started
     environment:
@@ -251,6 +303,7 @@ services:
       SECURITY_CORS_ALLOWED_ORIGINS: ${SECURITY_CORS_ALLOWED_ORIGINS:-http://localhost}
       SECURITY_SERVICE_URL: http://security:8082
       DEVICE_SERVICE_URL: http://device:8084
+      MEASUREMENT_SERVICE_URL: http://measurement:8085
       BACKEND_URL: http://backend:8083
     ports:
       # La app movil (APK) en la LAN llama directo al gateway: http://<IP de LAN>:8080

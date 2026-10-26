@@ -9,10 +9,10 @@
 #   8883  MQTT sobre TLS, para los dispositivos (internet)
 #   WEB_PORT (8081) en 127.0.0.1: la web y la API. Delante va un proxy HTTPS (Caddy/nginx)
 #         que reenvia TODO el dominio aqui; el nginx del frontend solo pasa /api/ al API
-#         gateway, que reparte entre los servicios de seguridad, dispositivos, mediciones y
-#         hogares y el backend, y rechaza /internal/**.
+#         gateway, que reparte entre los servicios de seguridad, dispositivos, mediciones,
+#         hogares y notificaciones y el backend, y rechaza /internal/**.
 #   15672 consola de RabbitMQ en 127.0.0.1, para abrirla con un tunel SSH
-# El gateway, los cinco servicios, MySQL, AMQP y el listener MQTT sin TLS (1883) quedan dentro de
+# El gateway, los seis servicios, MySQL, AMQP y el listener MQTT sin TLS (1883) quedan dentro de
 # la red de Docker. deploy/deploy.sh comprueba su salud con el healthcheck de cada contenedor.
 #
 # El mosquitto.conf es el mismo que en desarrollo; aqui "device" es el contenedor.
@@ -227,6 +227,63 @@ services:
     stop_grace_period: 30s
     restart: unless-stopped
 
+  # Notificaciones: entrega las alertas y recomendaciones a los miembros de un hogar por correo,
+  # Web Push y push movil; envia los codigos de verificacion y recuperacion del servicio de
+  # seguridad; guarda las notificaciones de los administradores y el registro de envios. Solo
+  # recibe public.pem.
+  notification:
+    build:
+      context: ${NOTIFICATION_CONTEXT:-../backend/en-monitor-notification-service}
+    depends_on:
+      mysql:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    environment:
+      # Cualquier perfil distinto de "local" (el de application-local.yaml).
+      SPRING_PROFILES_ACTIVE: prod
+      # La misma base que los otros servicios: aplica solo los changesets notification-*, que el
+      # backend ya aplico, asi que no ejecuta ninguno.
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/energy_monitor?connectionTimeZone=UTC&forceConnectionTimeZoneToSession=true
+      SPRING_DATASOURCE_USERNAME: energy_app
+      SPRING_DATASOURCE_PASSWORD: ${MYSQL_PASSWORD:?MYSQL_PASSWORD is required}
+      SECURITY_JWT_PUBLIC_KEY_PATH: /run/keys/public.pem
+      INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:?INTERNAL_API_TOKEN is required}
+      # Nombres y correos de los destinatarios, los administradores y el permiso USER.READ.
+      SECURITY_SERVICE_URL: http://security:8082
+      # Los miembros y el nombre de un hogar, y el nombre de un dispositivo.
+      HOME_SERVICE_URL: http://home:8086
+      DEVICE_SERVICE_URL: http://device:8084
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_USERNAME: ${RABBITMQ_USERNAME:-energy-monitor}
+      RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:?RABBITMQ_PASSWORD is required}
+      MAIL_HOST: ${MAIL_HOST:-smtp.gmail.com}
+      MAIL_PORT: ${MAIL_PORT:-587}
+      MAIL_USERNAME: ${MAIL_USERNAME:-}
+      MAIL_PASSWORD: ${MAIL_PASSWORD:-}
+      MAIL_FROM: ${MAIL_FROM:-}
+      NOTIFICATION_WEB_URL: ${NOTIFICATION_WEB_URL:?NOTIFICATION_WEB_URL is required}
+      # Las mismas llaves VAPID que el backend: los navegadores ligan su suscripcion a la publica.
+      NOTIFICATION_VAPID_PUBLIC_KEY: ${NOTIFICATION_VAPID_PUBLIC_KEY:-}
+      NOTIFICATION_VAPID_PRIVATE_KEY: ${NOTIFICATION_VAPID_PRIVATE_KEY:-}
+      # Push a las apps moviles por el relay de Expo. Vacio = push movil desactivado.
+      EXPO_ACCESS_TOKEN: ${EXPO_ACCESS_TOKEN:-}
+      # Los eventos de cuenta y los codigos de correo (account.*, mail.*) y las alertas y
+      # recomendaciones (alert.raised, recommendation.created). En false mientras el backend tenga
+      # su modulo de notificaciones, que hace lo mismo; se encienden al retirarlo (ver README).
+      SECURITY_EVENTS_CONSUMER_ENABLED: ${SECURITY_EVENTS_CONSUMER_ENABLED:-false}
+      ALERT_EVENTS_CONSUMER_ENABLED: ${ALERT_EVENTS_CONSUMER_ENABLED:-false}
+    volumes:
+      - ${JWT_KEYS_DIR:?JWT_KEYS_DIR is required}/public.pem:/run/keys/public.pem:ro
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8087/actuator/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 120s
+    stop_grace_period: 30s
+    restart: unless-stopped
+
   backend:
     build:
       context: ${BACKEND_CONTEXT:-../backend/energy-monitor-backend}
@@ -264,6 +321,9 @@ services:
       # Push a las apps moviles por el relay de Expo. Vacio = push movil desactivado.
       EXPO_ACCESS_TOKEN: ${EXPO_ACCESS_TOKEN:-}
       NOTIFICATION_WEB_URL: ${NOTIFICATION_WEB_URL:?NOTIFICATION_WEB_URL is required}
+      # Publica alert.raised y recommendation.created desde su outbox al servicio de notificaciones.
+      # En false mientras el backend tenga su modulo de notificaciones (ver README).
+      ALERT_OUTBOX_RELAY_ENABLED: ${ALERT_OUTBOX_RELAY_ENABLED:-false}
     volumes:
       - ${JWT_KEYS_DIR:?JWT_KEYS_DIR is required}/public.pem:/run/keys/public.pem:ro
     healthcheck:
@@ -290,6 +350,8 @@ services:
         condition: service_started
       home:
         condition: service_started
+      notification:
+        condition: service_started
       backend:
         condition: service_started
     environment:
@@ -299,6 +361,7 @@ services:
       DEVICE_SERVICE_URL: http://device:8084
       MEASUREMENT_SERVICE_URL: http://measurement:8085
       HOME_SERVICE_URL: http://home:8086
+      NOTIFICATION_SERVICE_URL: http://notification:8087
       BACKEND_URL: http://backend:8083
     volumes:
       - ${JWT_KEYS_DIR:?JWT_KEYS_DIR is required}/public.pem:/run/keys/public.pem:ro

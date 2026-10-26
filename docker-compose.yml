@@ -18,9 +18,12 @@
 #
 # El gateway es la unica entrada de la API: reenvia /api/v1/auth/** y /api/v1/admin/users|roles/**
 # al servicio de seguridad (8082), /api/v1/homes/*/devices/** y /api/v1/appliance-types/** al
-# servicio de dispositivos (8084) y el resto de /api/v1/** a energy-monitor-backend (8083). Los
-# servicios no publican puertos: solo se alcanzan por la red de Docker, asi que /internal/** nunca
-# queda expuesto. El gateway publica 8080 para la app movil y rechaza /internal/**.
+# servicio de dispositivos (8084), /api/v1/measurements/**, /api/v1/consumption-levels/** y
+# /api/v1/homes/*/consumption/** al servicio de mediciones (8085), el resto de /api/v1/homes/** y
+# /api/v1/home-types/** al servicio de hogares (8086) y el resto de /api/v1/** a
+# energy-monitor-backend (8083). Los servicios no publican puertos: solo se alcanzan por la red de
+# Docker, asi que /internal/** nunca queda expuesto. El gateway publica 8080 para la app movil y
+# rechaza /internal/**.
 #
 # La integracion MQTT ya esta hecha en el codigo: el broker delega la autenticacion de cada
 # cliente en el servicio de dispositivos (POST /internal/mqtt/auth/user y /acl). Aqui solo se
@@ -116,6 +119,10 @@ services:
       RABBITMQ_USERNAME: ${RABBITMQ_USERNAME:-energy-monitor}
       RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:?RABBITMQ_PASSWORD is required}
       INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:?INTERNAL_API_TOKEN is required}
+      # Antes de borrar una cuenta pregunta al servicio de hogares si puede (deletion-check).
+      HOME_SERVICE_URL: http://home:8086
+      # Solo para una imagen anterior a la que pregunta al servicio de hogares; se quita cuando el
+      # backend deje de servir los hogares.
       BACKEND_INTERNAL_URL: http://backend:8083
     volumes:
       - ./keys:/run/keys:ro
@@ -149,7 +156,10 @@ services:
       SPRING_DATASOURCE_PASSWORD: ${MYSQL_PASSWORD:?MYSQL_PASSWORD is required}
       SECURITY_JWT_PUBLIC_KEY_PATH: /run/keys/public.pem
       INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:?INTERNAL_API_TOKEN is required}
-      # Pregunta al backend si quien llama es miembro o dueño del hogar.
+      # Pregunta al servicio de hogares si quien llama es miembro o dueño del hogar.
+      HOME_SERVICE_URL: http://home:8086
+      # Solo para una imagen anterior a la que pregunta al servicio de hogares; se quita cuando el
+      # backend deje de servir los hogares.
       BACKEND_INTERNAL_URL: http://backend:8083
       RABBITMQ_HOST: rabbitmq
       RABBITMQ_USERNAME: ${RABBITMQ_USERNAME:-energy-monitor}
@@ -204,10 +214,13 @@ services:
       SPRING_DATASOURCE_PASSWORD: ${MYSQL_PASSWORD:?MYSQL_PASSWORD is required}
       SECURITY_JWT_PUBLIC_KEY_PATH: /run/keys/public.pem
       INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:?INTERNAL_API_TOKEN is required}
-      # Pregunta al backend si quien llama es miembro del hogar y sus limites, y al servicio de
-      # dispositivos de que hogar es cada modulo.
-      BACKEND_INTERNAL_URL: http://backend:8083
+      # Pregunta al servicio de hogares si quien llama es miembro del hogar y sus limites, y al
+      # servicio de dispositivos de que hogar es cada modulo.
+      HOME_SERVICE_URL: http://home:8086
       DEVICE_SERVICE_URL: http://device:8084
+      # Solo para una imagen anterior a la que pregunta al servicio de hogares; se quita cuando el
+      # backend deje de servir los hogares.
+      BACKEND_INTERNAL_URL: http://backend:8083
       RABBITMQ_HOST: rabbitmq
       RABBITMQ_USERNAME: ${RABBITMQ_USERNAME:-energy-monitor}
       RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:?RABBITMQ_PASSWORD is required}
@@ -227,6 +240,50 @@ services:
       retries: 6
       start_period: 120s
     # Al parar se desuscribe del broker y cierra las peticiones en curso.
+    stop_grace_period: 30s
+    restart: unless-stopped
+
+  # Hogares: crea hogares, une miembros con el codigo de acceso, roles, favoritos, transferencia
+  # del dueño, umbrales de consumo y tipos de hogar; responde a los otros servicios quien puede
+  # actuar sobre un hogar. Solo recibe public.pem.
+  home:
+    build:
+      context: ${HOME_CONTEXT:-../backend/en-monitor-home-service}
+    image: energy-monitor-home:local
+    container_name: energy-monitor-home
+    depends_on:
+      mysql:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    environment:
+      # Cualquier perfil distinto de "local" (el de application-local.yaml).
+      SPRING_PROFILES_ACTIVE: prod
+      # La misma base que los otros servicios: aplica solo los changesets home-*, que el backend ya
+      # aplico, asi que no ejecuta ninguno.
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/energy_monitor?connectionTimeZone=UTC&forceConnectionTimeZoneToSession=true
+      SPRING_DATASOURCE_USERNAME: energy_app
+      SPRING_DATASOURCE_PASSWORD: ${MYSQL_PASSWORD:?MYSQL_PASSWORD is required}
+      SECURITY_JWT_PUBLIC_KEY_PATH: /run/keys/public.pem
+      INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:?INTERNAL_API_TOKEN is required}
+      # Los nombres de los miembros de un hogar.
+      SECURITY_SERVICE_URL: http://security:8082
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_USERNAME: ${RABBITMQ_USERNAME:-energy-monitor}
+      RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:?RABBITMQ_PASSWORD is required}
+      # Apagados mientras el backend tenga su modulo de hogares: el relay del backend publica la
+      # tabla home_outbox (compartida, tambien las filas de este servicio) y su cola recibe
+      # account.deleted. Se encienden los dos cuando el backend deje de servir los hogares.
+      HOME_OUTBOX_RELAY_ENABLED: ${HOME_OUTBOX_RELAY_ENABLED:-false}
+      ACCOUNT_DELETED_CONSUMER_ENABLED: ${ACCOUNT_DELETED_CONSUMER_ENABLED:-false}
+    volumes:
+      - ./keys/public.pem:/run/keys/public.pem:ro
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8086/actuator/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 120s
     stop_grace_period: 30s
     restart: unless-stopped
 
@@ -263,6 +320,8 @@ services:
       # Lee los niveles de consumo y la energia del servicio de mediciones, y oye cada lectura por
       # RabbitMQ para las alertas. No se conecta al broker MQTT.
       MEASUREMENT_SERVICE_URL: http://measurement:8085
+      # El cliente del servicio de hogares (sin uso mientras el backend tenga su modulo de hogares).
+      HOME_SERVICE_URL: http://home:8086
       NOTIFICATION_WEB_URL: ${NOTIFICATION_WEB_URL:-http://localhost}
       NOTIFICATION_VAPID_PUBLIC_KEY: ${NOTIFICATION_VAPID_PUBLIC_KEY:-}
       NOTIFICATION_VAPID_PRIVATE_KEY: ${NOTIFICATION_VAPID_PRIVATE_KEY:-}
@@ -294,6 +353,8 @@ services:
         condition: service_started
       measurement:
         condition: service_started
+      home:
+        condition: service_started
       backend:
         condition: service_started
     environment:
@@ -304,6 +365,7 @@ services:
       SECURITY_SERVICE_URL: http://security:8082
       DEVICE_SERVICE_URL: http://device:8084
       MEASUREMENT_SERVICE_URL: http://measurement:8085
+      HOME_SERVICE_URL: http://home:8086
       BACKEND_URL: http://backend:8083
     ports:
       # La app movil (APK) en la LAN llama directo al gateway: http://<IP de LAN>:8080

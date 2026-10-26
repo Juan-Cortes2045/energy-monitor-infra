@@ -269,10 +269,11 @@ services:
       # Push a las apps moviles por el relay de Expo. Vacio = push movil desactivado.
       EXPO_ACCESS_TOKEN: ${EXPO_ACCESS_TOKEN:-}
       # Los eventos de cuenta y los codigos de correo (account.*, mail.*) y las alertas y
-      # recomendaciones (alert.raised, recommendation.created). En false mientras el backend tenga
-      # su modulo de notificaciones, que hace lo mismo; se encienden al retirarlo (ver README).
-      SECURITY_EVENTS_CONSUMER_ENABLED: ${SECURITY_EVENTS_CONSUMER_ENABLED:-false}
-      ALERT_EVENTS_CONSUMER_ENABLED: ${ALERT_EVENTS_CONSUMER_ENABLED:-false}
+      # recomendaciones (alert.raised, recommendation.created). El backend ya no tiene modulo de
+      # notificaciones: este servicio es el unico que lo hace. En false solo para volver atras a un
+      # backend que aun lo tenga.
+      SECURITY_EVENTS_CONSUMER_ENABLED: ${SECURITY_EVENTS_CONSUMER_ENABLED:-true}
+      ALERT_EVENTS_CONSUMER_ENABLED: ${ALERT_EVENTS_CONSUMER_ENABLED:-true}
     volumes:
       - ${JWT_KEYS_DIR:?JWT_KEYS_DIR is required}/public.pem:/run/keys/public.pem:ro
     healthcheck:
@@ -300,30 +301,20 @@ services:
       SPRING_DATASOURCE_PASSWORD: ${MYSQL_PASSWORD:?MYSQL_PASSWORD is required}
       # Solo valida los tokens: recibe la clave publica, nunca la privada.
       SECURITY_JWT_PUBLIC_KEY_PATH: /run/keys/public.pem
-      SECURITY_SERVICE_URL: http://security:8082
       INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:?INTERNAL_API_TOKEN is required}
       RABBITMQ_HOST: rabbitmq
       RABBITMQ_USERNAME: ${RABBITMQ_USERNAME:-energy-monitor}
       RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:?RABBITMQ_PASSWORD is required}
-      MAIL_HOST: ${MAIL_HOST:-smtp.gmail.com}
-      MAIL_PORT: ${MAIL_PORT:-587}
-      MAIL_USERNAME: ${MAIL_USERNAME:-}
-      MAIL_PASSWORD: ${MAIL_PASSWORD:-}
-      MAIL_FROM: ${MAIL_FROM:-}
       # Lee los dispositivos (con cache) del servicio de dispositivos.
       DEVICE_SERVICE_URL: http://device:8084
       # Niveles de consumo y energia del servicio de mediciones; cada lectura llega por RabbitMQ.
       MEASUREMENT_SERVICE_URL: http://measurement:8085
       # Lee los hogares, sus miembros y sus limites (con cache) del servicio de hogares.
       HOME_SERVICE_URL: http://home:8086
-      NOTIFICATION_VAPID_PUBLIC_KEY: ${NOTIFICATION_VAPID_PUBLIC_KEY:-}
-      NOTIFICATION_VAPID_PRIVATE_KEY: ${NOTIFICATION_VAPID_PRIVATE_KEY:-}
-      # Push a las apps moviles por el relay de Expo. Vacio = push movil desactivado.
-      EXPO_ACCESS_TOKEN: ${EXPO_ACCESS_TOKEN:-}
-      NOTIFICATION_WEB_URL: ${NOTIFICATION_WEB_URL:?NOTIFICATION_WEB_URL is required}
-      # Publica alert.raised y recommendation.created desde su outbox al servicio de notificaciones.
-      # En false mientras el backend tenga su modulo de notificaciones (ver README).
-      ALERT_OUTBOX_RELAY_ENABLED: ${ALERT_OUTBOX_RELAY_ENABLED:-false}
+      # Publica alert.raised y recommendation.created desde su outbox al servicio de notificaciones,
+      # el unico que los entrega. En false solo para volver atras a un servicio de notificaciones
+      # con los consumidores apagados: los eventos esperan en backend_outbox.
+      ALERT_OUTBOX_RELAY_ENABLED: ${ALERT_OUTBOX_RELAY_ENABLED:-true}
     volumes:
       - ${JWT_KEYS_DIR:?JWT_KEYS_DIR is required}/public.pem:/run/keys/public.pem:ro
     healthcheck:

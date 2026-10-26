@@ -9,10 +9,10 @@
 #   8883  MQTT sobre TLS, para los dispositivos (internet)
 #   WEB_PORT (8081) en 127.0.0.1: la web y la API. Delante va un proxy HTTPS (Caddy/nginx)
 #         que reenvia TODO el dominio aqui; el nginx del frontend solo pasa /api/ al API
-#         gateway, que reparte entre los servicios de seguridad, dispositivos y mediciones y el
-#         backend, y rechaza /internal/**.
+#         gateway, que reparte entre los servicios de seguridad, dispositivos, mediciones y
+#         hogares y el backend, y rechaza /internal/**.
 #   15672 consola de RabbitMQ en 127.0.0.1, para abrirla con un tunel SSH
-# El gateway, los cuatro servicios, MySQL, AMQP y el listener MQTT sin TLS (1883) quedan dentro de
+# El gateway, los cinco servicios, MySQL, AMQP y el listener MQTT sin TLS (1883) quedan dentro de
 # la red de Docker. deploy/deploy.sh comprueba su salud con el healthcheck de cada contenedor.
 #
 # El mosquitto.conf es el mismo que en desarrollo; aqui "device" es el contenedor.
@@ -89,6 +89,9 @@ services:
       RABBITMQ_USERNAME: ${RABBITMQ_USERNAME:-energy-monitor}
       RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:?RABBITMQ_PASSWORD is required}
       INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:?INTERNAL_API_TOKEN is required}
+      # Antes de borrar una cuenta pregunta al servicio de hogares si puede (deletion-check).
+      HOME_SERVICE_URL: http://home:8086
+      # Solo para una imagen anterior a la que pregunta al servicio de hogares.
       BACKEND_INTERNAL_URL: http://backend:8083
     volumes:
       - ${JWT_KEYS_DIR:?JWT_KEYS_DIR is required}:/run/keys:ro
@@ -120,6 +123,9 @@ services:
       SPRING_DATASOURCE_PASSWORD: ${MYSQL_PASSWORD:?MYSQL_PASSWORD is required}
       SECURITY_JWT_PUBLIC_KEY_PATH: /run/keys/public.pem
       INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:?INTERNAL_API_TOKEN is required}
+      # Pregunta al servicio de hogares si quien llama es miembro o dueño del hogar.
+      HOME_SERVICE_URL: http://home:8086
+      # Solo para una imagen anterior a la que pregunta al servicio de hogares.
       BACKEND_INTERNAL_URL: http://backend:8083
       RABBITMQ_HOST: rabbitmq
       RABBITMQ_USERNAME: ${RABBITMQ_USERNAME:-energy-monitor}
@@ -165,8 +171,11 @@ services:
       SPRING_DATASOURCE_PASSWORD: ${MYSQL_PASSWORD:?MYSQL_PASSWORD is required}
       SECURITY_JWT_PUBLIC_KEY_PATH: /run/keys/public.pem
       INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:?INTERNAL_API_TOKEN is required}
-      BACKEND_INTERNAL_URL: http://backend:8083
+      # Miembros y limites de un hogar (servicio de hogares) y hogar de cada modulo (dispositivos).
+      HOME_SERVICE_URL: http://home:8086
       DEVICE_SERVICE_URL: http://device:8084
+      # Solo para una imagen anterior a la que pregunta al servicio de hogares.
+      BACKEND_INTERNAL_URL: http://backend:8083
       RABBITMQ_HOST: rabbitmq
       RABBITMQ_USERNAME: ${RABBITMQ_USERNAME:-energy-monitor}
       RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:?RABBITMQ_PASSWORD is required}
@@ -179,6 +188,44 @@ services:
       - ${JWT_KEYS_DIR:?JWT_KEYS_DIR is required}/public.pem:/run/keys/public.pem:ro
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8085/actuator/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 120s
+    stop_grace_period: 30s
+    restart: unless-stopped
+
+  # Hogares: hogares, miembros, roles, transferencia del dueño, umbrales y tipos de hogar; responde
+  # a los otros servicios quien puede actuar sobre un hogar. Solo recibe public.pem.
+  home:
+    build:
+      context: ${HOME_CONTEXT:-../backend/en-monitor-home-service}
+    depends_on:
+      mysql:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    environment:
+      # Cualquier perfil distinto de "local" (el de application-local.yaml).
+      SPRING_PROFILES_ACTIVE: prod
+      # La misma base que los otros servicios: aplica solo los changesets home-*.
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/energy_monitor?connectionTimeZone=UTC&forceConnectionTimeZoneToSession=true
+      SPRING_DATASOURCE_USERNAME: energy_app
+      SPRING_DATASOURCE_PASSWORD: ${MYSQL_PASSWORD:?MYSQL_PASSWORD is required}
+      SECURITY_JWT_PUBLIC_KEY_PATH: /run/keys/public.pem
+      INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:?INTERNAL_API_TOKEN is required}
+      SECURITY_SERVICE_URL: http://security:8082
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_USERNAME: ${RABBITMQ_USERNAME:-energy-monitor}
+      RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:?RABBITMQ_PASSWORD is required}
+      # Apagados mientras el backend tenga su modulo de hogares (su relay publica home_outbox y su
+      # cola recibe account.deleted). Se encienden cuando el backend deje de servir los hogares.
+      HOME_OUTBOX_RELAY_ENABLED: ${HOME_OUTBOX_RELAY_ENABLED:-false}
+      ACCOUNT_DELETED_CONSUMER_ENABLED: ${ACCOUNT_DELETED_CONSUMER_ENABLED:-false}
+    volumes:
+      - ${JWT_KEYS_DIR:?JWT_KEYS_DIR is required}/public.pem:/run/keys/public.pem:ro
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8086/actuator/health"]
       interval: 10s
       timeout: 5s
       retries: 6
@@ -216,6 +263,8 @@ services:
       DEVICE_SERVICE_URL: http://device:8084
       # Niveles de consumo y energia del servicio de mediciones; cada lectura llega por RabbitMQ.
       MEASUREMENT_SERVICE_URL: http://measurement:8085
+      # El cliente del servicio de hogares (sin uso mientras el backend tenga su modulo de hogares).
+      HOME_SERVICE_URL: http://home:8086
       NOTIFICATION_VAPID_PUBLIC_KEY: ${NOTIFICATION_VAPID_PUBLIC_KEY:-}
       NOTIFICATION_VAPID_PRIVATE_KEY: ${NOTIFICATION_VAPID_PRIVATE_KEY:-}
       # Push a las apps moviles por el relay de Expo. Vacio = push movil desactivado.
@@ -245,6 +294,8 @@ services:
         condition: service_started
       measurement:
         condition: service_started
+      home:
+        condition: service_started
       backend:
         condition: service_started
     environment:
@@ -253,6 +304,7 @@ services:
       SECURITY_SERVICE_URL: http://security:8082
       DEVICE_SERVICE_URL: http://device:8084
       MEASUREMENT_SERVICE_URL: http://measurement:8085
+      HOME_SERVICE_URL: http://home:8086
       BACKEND_URL: http://backend:8083
     volumes:
       - ${JWT_KEYS_DIR:?JWT_KEYS_DIR is required}/public.pem:/run/keys/public.pem:ro

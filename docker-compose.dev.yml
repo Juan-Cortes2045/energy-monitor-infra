@@ -9,6 +9,7 @@
 #   cd ../backend/en-monitor-device-service   && ./mvnw spring-boot:run    # :8084
 #   cd ../backend/en-monitor-measurement-service && ./mvnw spring-boot:run # :8085
 #   cd ../backend/en-monitor-home-service     && ./mvnw spring-boot:run    # :8086
+#   cd ../backend/en-monitor-notification-service && ./mvnw spring-boot:run    # :8087
 #   cd ../backend/energy-monitor-backend      && ./mvnw spring-boot:run    # :8083
 #   cd ../backend/en-monitor-api-gateway      && ./mvnw spring-boot:run    # :8080
 #
@@ -16,7 +17,7 @@
 # .env), asi que el .env y el application-local.yaml de cada servicio deben usar MYSQL_PASSWORD,
 # RABBITMQ_USERNAME/RABBITMQ_PASSWORD e INTERNAL_API_TOKEN de infra/.env.
 # Si la pila completa estaba arriba, primero:
-#   docker compose stop gateway security device measurement home backend frontend
+#   docker compose stop gateway security device measurement home notification backend frontend
 #
 # El servicio de dispositivos corre en el host, asi que "device" (el que autentica a cada cliente
 # MQTT) apunta al host con host-gateway. En Linux con ufw hace falta permitir la red de Docker:

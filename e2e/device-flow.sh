@@ -41,6 +41,17 @@ mysql_q() {
   "${compose[@]}" exec -T -e MYSQL_PWD="$(grep '^MYSQL_PASSWORD=' "$here/.env" | cut -d= -f2-)" mysql \
     mysql -N -B -uenergy_app energy_monitor -e "$1"; }
 
+# El código que el servicio de seguridad manda por correo, calculado como él lo hace
+# (EmailVerificationService): HMAC-SHA256 con el pepper sobre el id que reserva la solicitud de
+# registro, la dirección y la ventana de 15 minutos, reducido a seis dígitos.
+verification_code() { # email
+  local email="${1,,}" id pepper digest
+  id="$(mysql_q "SELECT id_user FROM pending_registration WHERE email = '$email'")"
+  pepper="$(grep '^SECURITY_RESET_PEPPER=' "$here/.env" | cut -d= -f2-)"
+  digest="$(printf '%s' "$id:email-verification:$email:$(( $(date +%s) / 900 ))" \
+    | openssl dgst -sha256 -hmac "$pepper" -r | cut -c1-12)"
+  printf '%06d' $(( 16#$digest % 1000000 )); }
+
 echo "1. Rutas del gateway"
 check "/api/v1/homes sin token" 401 "$(status "$API/homes")"
 check "/api/v1/appliance-types sin token" 401 "$(status "$API/appliance-types")"
@@ -54,13 +65,18 @@ echo "2. Cuenta y hogar"
 mail_user="$(grep '^MAIL_USERNAME=' "$here/.env" | cut -d= -f2-)"
 [[ "$mail_user" == *@* ]] || { echo "Falta MAIL_USERNAME en .env (la prueba registra una cuenta con ese dominio)"; exit 1; }
 email="${mail_user%@*}+e2e-$(date +%s)@${mail_user#*@}"; password='E2e-Pass-2026!'
-check "registro (security)" 201 "$(status -X POST -H 'Content-Type: application/json' \
+check "registro (security): solicitud aceptada" 202 "$(status -X POST -H 'Content-Type: application/json' \
   -d "{\"email\":\"$email\",\"password\":\"$password\",\"name\":\"E2E\",\"lastName\":\"Device\"}" "$API/auth/register")"
 check "sin verificar el correo no hay sesión" 403 "$(status -X POST -H 'Content-Type: application/json' \
   -d "{\"email\":\"$email\",\"password\":\"$password\"}" "$API/auth/login")"
-# El código de verificación llega por correo; la prueba marca la dirección como verificada en la
-# base, como si se hubiera escrito el código.
-mysql_q "UPDATE user SET email_verified = 1 WHERE email = '$email' AND deleted_at IS NULL"
+check "sin verificar no hay cuenta en la base" 0 \
+  "$(mysql_q "SELECT COUNT(*) FROM user WHERE email = '${email,,}'")"
+# El código llega por correo; la prueba lo calcula como el servicio y lo verifica por la API, que es
+# cuando se crea la cuenta.
+check "verificar el correo crea la cuenta" 200 "$(status -X POST -H 'Content-Type: application/json' \
+  -d "{\"email\":\"$email\",\"code\":\"$(verification_code "$email")\"}" "$API/auth/email/verify")"
+check "la solicitud de registro ya no existe" 0 \
+  "$(mysql_q "SELECT COUNT(*) FROM pending_registration WHERE email = '${email,,}'")"
 token="$(curl -fsS -X POST -H 'Content-Type: application/json' \
   -d "{\"email\":\"$email\",\"password\":\"$password\"}" "$API/auth/login" | jq -r .accessToken)"
 auth=(-H "Authorization: Bearer $token")

@@ -552,8 +552,10 @@ Con la pila completa arriba y los cinco servicios `(healthy)`:
 ```
 
 Crea una cuenta (`MAIL_USERNAME` con el sufijo `+e2e-…`, porque el registro exige un dominio que
-reciba correo) y un hogar de prueba; comprueba que sin verificar el correo el
-login responde 403 y marca la dirección como verificada en la base. Luego recorre lo que cruza los servicios:
+reciba correo) y un hogar de prueba; comprueba que el registro responde 202 sin crear la cuenta,
+que sin verificar el correo el login responde 403, y verifica la dirección por la API con el código
+calculado como lo calcula el servicio de seguridad (con `SECURITY_RESET_PEPPER` del `.env`): ahí se
+crea la cuenta y se borra la solicitud de registro. Luego recorre lo que cruza los servicios:
 rutas del gateway, vincular un módulo (el servicio de dispositivos pregunta al backend), el broker
 autenticando contra `device:8084` (clave correcta e incorrecta), telemetría (`ONLINE` en el servicio
 de dispositivos y la lectura guardada en el servicio de mediciones), estado `offline` (evento

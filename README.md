@@ -176,7 +176,7 @@ Ninguno se versiona. En todos:
 | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `VITE_GOOGLE_CLIENT_ID`   | no          | El cliente OAuth de Google (ver abajo). `VITE_GOOGLE_CLIENT_ID` lleva el mismo ID. Si están vacías, no aparece el botón de Google.                                                                                                     |
 | `NOTIFICATION_VAPID_PUBLIC_KEY`, `NOTIFICATION_VAPID_PRIVATE_KEY`     | no          | Comandos de abajo, una vez por entorno. Si están vacías, no hay notificaciones push en el navegador.                                                                                                                                   |
 | `EXPO_ACCESS_TOKEN`                                                   | no          | En expo.dev: _Account settings → Access tokens → Create token_. Si está vacía, no hay push en la app móvil. Va solo en el servidor, nunca en la app.                                                                                   |
-| `HOME_OUTBOX_RELAY_ENABLED`, `ACCOUNT_DELETED_CONSUMER_ENABLED`       | no          | `false` (por defecto) mientras energy-monitor-backend tenga su módulo de hogares; `true` las dos cuando deje de servirlos (ver "Servicio de hogares").                                                                                  |
+| `HOME_OUTBOX_RELAY_ENABLED`, `ACCOUNT_DELETED_CONSUMER_ENABLED`       | no          | `true` (por defecto). `false` solo para volver atrás a un backend que aún tenga su módulo de hogares (ver "Servicio de hogares").                                                                                                       |
 | `*_CONTEXT`                                                           | no          | Solo si los repositorios no están clonados uno al lado del otro (ver "Requisitos").                                                                                                                                                    |
 
 **Contraseña de aplicación de Gmail** (`MAIL_PASSWORD`). Tu contraseña normal de Gmail no sirve
@@ -417,19 +417,32 @@ tener ya su `Dockerfile` en `main`.
 `home` atiende los hogares, sus miembros y umbrales y los tipos de hogar, y responde a los otros
 servicios quién puede actuar sobre un hogar. El gateway le manda `/api/v1/homes/**` (salvo los
 dispositivos y el consumo de un hogar) y `/api/v1/home-types/**`; seguridad, dispositivos y
-mediciones le preguntan en `HOME_SERVICE_URL`. Comparte las tablas `home*` con
-energy-monitor-backend mientras este conserve su módulo de hogares, así que el corte va en dos
-pasos:
+mediciones le preguntan en `HOME_SERVICE_URL`, y el backend lee de él los hogares de las alertas,
+notificaciones y recomendaciones. Es el único dueño de las tablas `home*`: publica `home.deleted`
+desde su outbox (`HOME_OUTBOX_RELAY_ENABLED`) y limpia las cuentas borradas en la cola
+`home-service.home.account-deleted` (`ACCOUNT_DELETED_CONSUMER_ENABLED`), las dos encendidas por
+defecto. En `false` solo sirven para volver atrás a un backend que aún tenga su módulo de hogares,
+que hacía ambas cosas: con los dos encendidos cada mensaje se procesaría dos veces.
 
-1. **Ahora:** el contenedor `home` atiende el tráfico con `HOME_OUTBOX_RELAY_ENABLED=false` y
-   `ACCOUNT_DELETED_CONSUMER_ENABLED=false`. Los `home.deleted` que escribe en `home_outbox` los
-   publica el relay del backend, y `account.deleted` lo sigue procesando la cola del backend.
-2. **Cuando el backend quite su módulo de hogares:** las dos en `true` en el `.env` y
-   `docker compose up -d home`. Encenderlas antes haría que cada mensaje se procesara dos veces.
+**Corte desde el despliegue en dos pasos** (el servidor tenía el servicio de hogares con los dos
+interruptores apagados y el backend con su módulo de hogares):
 
-Seguridad, dispositivos y mediciones reciben también `BACKEND_INTERNAL_URL` mientras tanto: una
-imagen anterior a la que pregunta al servicio de hogares sigue preguntando al backend, que aún
-sirve los hogares. Se quita en el paso 2.
+1. Respaldo de MySQL (`deploy/backup-mysql.sh`).
+2. `deploy/deploy.sh infra`: recrea `home` con el relay y el consumidor encendidos y quita
+   `BACKEND_INTERNAL_URL` de seguridad, dispositivos y mediciones (ya preguntan al servicio de
+   hogares).
+3. Enseguida `deploy/deploy.sh backend`, con el backend sin módulo de hogares. Entre los dos pasos
+   los dos relays y los dos consumidores corren a la vez: un `home.deleted` puede salir dos veces y
+   un `account.deleted` procesarse dos veces, lo que los consumidores toleran (son idempotentes).
+   El orden inverso perdería los `account.deleted` de ese intervalo.
+4. La cola del backend ya no tiene consumidor y se llenaría con cada cuenta borrada: bórrala.
+
+   ```bash
+   docker compose -f docker-compose.prod.yml --env-file .env.prod exec rabbitmq \
+     rabbitmqctl delete_queue energy-monitor-backend.home.account-deleted
+   docker compose -f docker-compose.prod.yml --env-file .env.prod exec rabbitmq \
+     rabbitmqctl delete_queue energy-monitor-backend.home.account-deleted.dlq
+   ```
 
 **Primer despliegue con el servicio de hogares:** el contenedor `home` debe estar arriba **antes**
 que el gateway con las rutas nuevas y que los servicios que le preguntan; si no, esas rutas

@@ -22,9 +22,8 @@
 # /api/v1/homes/*/consumption/** al servicio de mediciones (8085), el resto de /api/v1/homes/** y
 # /api/v1/home-types/** al servicio de hogares (8086), /api/v1/notifications/** y
 # /api/v1/admin/notifications/** al servicio de notificaciones (8087), /api/v1/alerts/** al
-# servicio de alertas (8088), /api/v1/recommendations/** al servicio de recomendaciones (8089) y
-# el resto de /api/v1/** a
-# energy-monitor-backend (8083). Los servicios no publican puertos: solo se alcanzan por la red de
+# servicio de alertas (8088) y /api/v1/recommendations/** al servicio de recomendaciones (8089); el
+# resto responde 404. Los servicios no publican puertos: solo se alcanzan por la red de
 # Docker, asi que /internal/** nunca queda expuesto. El gateway publica 8080 para la app movil y
 # rechaza /internal/**.
 #
@@ -190,8 +189,8 @@ services:
     restart: unless-stopped
 
   # Mediciones: guarda la telemetria de los modulos y sirve el historial, el consumo de un hogar
-  # y los niveles de consumo; anuncia cada lectura al backend (measurement.recorded). Solo recibe
-  # public.pem.
+  # y los niveles de consumo; anuncia cada lectura al servicio de alertas (measurement.recorded).
+  # Solo recibe public.pem.
   measurement:
     build:
       context: ${MEASUREMENT_CONTEXT:-../backend/en-monitor-measurement-service}
@@ -378,12 +377,10 @@ services:
       RABBITMQ_USERNAME: ${RABBITMQ_USERNAME:-energy-monitor}
       RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:?RABBITMQ_PASSWORD is required}
       # Crear las alertas desde sus colas (alert-service.measurement.recorded y
-      # alert-service.device.events). Apagado mientras energy-monitor-backend las siga creando: con
-      # los dos encendidos cada alerta se crearia dos veces. Las colas existen igual y acumulan; ver
-      # "Servicio de alertas" en el README antes de encenderlo.
-      ALERT_CONSUMERS_ENABLED: ${ALERT_CONSUMERS_ENABLED:-false}
-      # Publica alert_outbox (alert.raised). Otro nombre que ALERT_OUTBOX_RELAY_ENABLED, que es el
-      # outbox del backend.
+      # alert-service.device.events). Encendido: el backend que tambien las creaba ya no existe. En
+      # false solo para volver atras a ese backend.
+      ALERT_CONSUMERS_ENABLED: ${ALERT_CONSUMERS_ENABLED:-true}
+      # Publica alert_outbox (alert.raised).
       ALERT_OUTBOX_RELAY_ENABLED: ${ALERT_SERVICE_OUTBOX_RELAY_ENABLED:-true}
       ALERT_LIMIT_ZONE: ${ALERT_LIMIT_ZONE:-America/Bogota}
     volumes:
@@ -430,10 +427,9 @@ services:
       RABBITMQ_HOST: rabbitmq
       RABBITMQ_USERNAME: ${RABBITMQ_USERNAME:-energy-monitor}
       RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:?RABBITMQ_PASSWORD is required}
-      # La evaluacion cada hora. Apagada mientras energy-monitor-backend siga evaluando: con los dos
-      # encendidos el mismo consejo podria guardarse y anunciarse dos veces. Ver "Servicio de
-      # recomendaciones" en el README antes de encenderla.
-      RECOMMENDATION_SCHEDULER_ENABLED: ${RECOMMENDATION_SCHEDULER_ENABLED:-false}
+      # La evaluacion cada hora. Encendida: el backend que tambien evaluaba ya no existe. En false
+      # solo para volver atras a ese backend.
+      RECOMMENDATION_SCHEDULER_ENABLED: ${RECOMMENDATION_SCHEDULER_ENABLED:-true}
       # Publica recommendation_outbox (recommendation.created).
       RECOMMENDATION_OUTBOX_RELAY_ENABLED: ${RECOMMENDATION_OUTBOX_RELAY_ENABLED:-true}
       RECOMMENDATION_ZONE: ${RECOMMENDATION_ZONE:-America/Bogota}
@@ -445,52 +441,6 @@ services:
       timeout: 5s
       retries: 6
       start_period: 120s
-    stop_grace_period: 30s
-    restart: unless-stopped
-
-  backend:
-    build:
-      context: ${BACKEND_CONTEXT:-../backend/energy-monitor-backend}
-    image: energy-monitor-backend:local
-    container_name: energy-monitor-backend
-    depends_on:
-      mysql:
-        condition: service_healthy
-      rabbitmq:
-        condition: service_healthy
-    environment:
-      # Cualquier perfil distinto de "local" (el de application-local.yaml).
-      SPRING_PROFILES_ACTIVE: prod
-      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/energy_monitor?connectionTimeZone=UTC&forceConnectionTimeZoneToSession=true
-      SPRING_DATASOURCE_USERNAME: energy_app
-      SPRING_DATASOURCE_PASSWORD: ${MYSQL_PASSWORD:?MYSQL_PASSWORD is required}
-      # Solo valida los tokens: recibe la clave publica, nunca la privada.
-      SECURITY_JWT_PUBLIC_KEY_PATH: /run/keys/public.pem
-      INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:?INTERNAL_API_TOKEN is required}
-      RABBITMQ_HOST: rabbitmq
-      RABBITMQ_USERNAME: ${RABBITMQ_USERNAME:-energy-monitor}
-      RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:?RABBITMQ_PASSWORD is required}
-      # Lee los dispositivos (con cache) del servicio de dispositivos.
-      DEVICE_SERVICE_URL: http://device:8084
-      # Lee los niveles de consumo y la energia del servicio de mediciones, y oye cada lectura por
-      # RabbitMQ para las alertas. No se conecta al broker MQTT.
-      MEASUREMENT_SERVICE_URL: http://measurement:8085
-      # Lee los hogares, sus miembros y sus limites (con cache) del servicio de hogares.
-      HOME_SERVICE_URL: http://home:8086
-      # Publica alert.raised y recommendation.created desde su outbox al servicio de notificaciones,
-      # el unico que los entrega. En false solo para volver atras a un servicio de notificaciones
-      # con los consumidores apagados: los eventos esperan en backend_outbox.
-      ALERT_OUTBOX_RELAY_ENABLED: ${ALERT_OUTBOX_RELAY_ENABLED:-true}
-    volumes:
-      - ./keys/public.pem:/run/keys/public.pem:ro
-    healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://localhost:8083/actuator/health"]
-      interval: 10s
-      timeout: 5s
-      retries: 6
-      start_period: 120s
-    # Al parar, el backend cierra las peticiones en curso; con los 10 s por defecto Docker lo
-    # mataba a mitad (exit 137).
     stop_grace_period: 30s
     restart: unless-stopped
 
@@ -515,8 +465,6 @@ services:
         condition: service_started
       recommendation:
         condition: service_started
-      backend:
-        condition: service_started
     environment:
       SECURITY_JWT_PUBLIC_KEY_PATH: /run/keys/public.pem
       # Con el nginx del frontend delante la web es del mismo origen; solo hace falta para otro
@@ -529,7 +477,6 @@ services:
       NOTIFICATION_SERVICE_URL: http://notification:8087
       ALERT_SERVICE_URL: http://alert:8088
       RECOMMENDATION_SERVICE_URL: http://recommendation:8089
-      BACKEND_URL: http://backend:8083
     ports:
       # La app movil (APK) en la LAN llama directo al gateway: http://<IP de LAN>:8080
       - "8080:8080"

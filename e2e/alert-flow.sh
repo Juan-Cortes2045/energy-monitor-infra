@@ -2,8 +2,7 @@
 # =============================================================================
 # EnergyMonitor - Prueba de punta a punta del servicio de alertas (pila completa local)
 # =============================================================================
-# Uso, con la pila arriba (docker compose up -d --build), todo (healthy), el backend sin modulo de
-# alertas y ALERT_CONSUMERS_ENABLED=true en .env:
+# Uso, con la pila arriba (docker compose up -d --build) y todo (healthy):
 #   ./e2e/alert-flow.sh
 #
 # Recorre lo que cruza los servicios con una alerta: el modulo publica telemetria -> mediciones la

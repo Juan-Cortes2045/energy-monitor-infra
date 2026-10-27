@@ -6,10 +6,10 @@
 #   ./e2e/measurement-flow.sh
 #
 # Recorre lo que cruza los servicios con una lectura: el modulo publica telemetria -> el servicio
-# de mediciones la guarda (una sola vez: el backend ya no se suscribe) y la anuncia por su outbox
-# (measurement.recorded) -> el backend la oye y su alerta de umbral clasifica la lectura con los
+# de mediciones la guarda (una sola vez) y la anuncia por su outbox
+# (measurement.recorded) -> el servicio de alertas la oye y clasifica la lectura con los
 # niveles del servicio -> una lectura baja la resuelve. Tambien el consumo del hogar y los niveles
-# por el gateway, y que la cola del backend quede vacia.
+# por el gateway, y que la cola del servicio de alertas quede vacia.
 #
 # Crea una cuenta (MAIL_USERNAME+e2e-...) y un hogar de prueba; al final borra el hogar. No imprime
 # la API key del modulo.
@@ -93,7 +93,7 @@ auth=(-H "Authorization: Bearer $token")
 home_type="$(get /home-types | jq -r '.[0].idHomeType')"
 home="$(curl -fsS "${auth[@]}" -X POST -H 'Content-Type: application/json' \
   -d "{\"name\":\"Casa E2E mediciones\",\"homeTypeId\":\"$home_type\",\"address\":\"Calle 1\"}" "$API/homes" | jq -r .idHome)"
-[[ -n "$home" && "$home" != null ]] && ok "hogar creado (backend) $home" || bad "hogar no creado"
+[[ -n "$home" && "$home" != null ]] && ok "hogar creado (home) $home" || bad "hogar no creado"
 
 echo "3. Vincular un modulo"
 appliance="$(get /appliance-types | jq -r '.[0].idApplianceType')"
@@ -108,21 +108,21 @@ check "lista de dispositivos del hogar" "$device" "$(get "/homes/$home/devices" 
 
 topic="energy-monitor/devices/$device"
 
-echo "4. Lectura alta: mediciones la guarda y el backend levanta la alerta de umbral"
+echo "4. Lectura alta: mediciones la guarda y el servicio de alertas levanta la alerta de umbral"
 reading 2000.0 1.0 && ok "telemetria aceptada por el broker" || bad "telemetria rechazada por el broker"
 eventually "lectura guardada (mediciones)" 2000.0 bash -c "curl -fsS -H 'Authorization: Bearer $token' '$API/measurements/latest?deviceId=$device' | jq -r .activePower"
 eventually "guardada una sola vez" 1 mysql_q "SELECT COUNT(*) FROM measurement WHERE device_id='$device'"
 eventually "measurement.recorded publicado (outbox de mediciones)" 0 \
   mysql_q "SELECT COUNT(*) FROM measurement_outbox WHERE payload LIKE '%$device%' AND published_at IS NULL"
-eventually "alerta THRESHOLD pendiente (backend)" 1 pending_threshold
+eventually "alerta THRESHOLD pendiente (alert)" 1 pending_threshold
 latest="$(get "/measurements/latest?deviceId=$device" | jq -r .idMeasurement)"
 check "la alerta apunta a la lectura" "$latest" \
   "$(get "/alerts?homeId=$home&status=PENDING" | jq -r "[.[] | select(.type == \"THRESHOLD\")][0].measurementId")"
 
-echo "5. Lectura baja: el backend resuelve la alerta"
+echo "5. Lectura baja: el servicio de alertas resuelve la alerta"
 reading 200.0 1.1 && ok "telemetria baja aceptada" || bad "telemetria baja rechazada"
 eventually "dos lecturas guardadas" 2 mysql_q "SELECT COUNT(*) FROM measurement WHERE device_id='$device'"
-eventually "alerta THRESHOLD resuelta (backend)" 0 pending_threshold
+eventually "alerta THRESHOLD resuelta (alert)" 0 pending_threshold
 
 echo "6. Consumo y niveles por el gateway (mediciones)"
 check "niveles de consumo" 4 "$(get /consumption-levels | jq length)"
@@ -130,12 +130,12 @@ check "resumen del hogar con su modulo" "$device" \
   "$(get "/homes/$home/consumption/summary?zone=America/Bogota" | jq -r '.devices[0].deviceId')"
 check "historial del hogar" 200 "$(status "${auth[@]}" "$API/homes/$home/consumption/history?period=day&zone=America/Bogota")"
 check "estadisticas del modulo" 2 "$(get "/measurements/statistics?deviceId=$device" | jq -r .measurementCount)"
-eventually "cola del backend vacia (energy-monitor-backend.measurement.recorded)" 0 \
-  rabbit_queue energy-monitor-backend.measurement.recorded
-check "nada en su dead-letter" 0 "$(rabbit_queue energy-monitor-backend.measurement.recorded.dlq)"
+eventually "cola del servicio de alertas vacia (alert-service.measurement.recorded)" 0 \
+  rabbit_queue alert-service.measurement.recorded
+check "nada en su dead-letter" 0 "$(rabbit_queue alert-service.measurement.recorded.dlq)"
 
 echo "7. Limpieza"
-check "hogar borrado (backend)" 204 "$(status -X DELETE "${auth[@]}" "$API/homes/$home")"
+check "hogar borrado (home)" 204 "$(status -X DELETE "${auth[@]}" "$API/homes/$home")"
 
 echo
 echo "Resultado: $pass OK, $fail fallas (cuenta de prueba: $email)"

@@ -66,7 +66,7 @@ mail_user="$(grep '^MAIL_USERNAME=' "$here/.env" | cut -d= -f2-)"
 [[ "$mail_user" == *@* ]] || { echo "Falta MAIL_USERNAME en .env (la prueba registra una cuenta con ese dominio)"; exit 1; }
 email="${mail_user%@*}+e2e-$(date +%s)@${mail_user#*@}"; password='E2e-Pass-2026!'
 check "registro (security): solicitud aceptada" 202 "$(status -X POST -H 'Content-Type: application/json' \
-  -d "{\"email\":\"$email\",\"password\":\"$password\",\"name\":\"E2E\",\"lastName\":\"Device\"}" "$API/auth/register")"
+  -d "{\"email\":\"$email\",\"password\":\"$password\",\"name\":\"E2E\",\"lastName\":\"Device\",\"acceptTerms\":true}" "$API/auth/register")"
 check "sin verificar el correo no hay sesión" 403 "$(status -X POST -H 'Content-Type: application/json' \
   -d "{\"email\":\"$email\",\"password\":\"$password\"}" "$API/auth/login")"
 check "sin verificar no hay cuenta en la base" 0 \

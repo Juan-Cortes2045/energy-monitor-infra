@@ -118,6 +118,10 @@ services:
       # Vacio en ambos = boton de Google desactivado (503).
       GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
       GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      # Código por correo para borrar una cuenta creada con Google (mail.account-deletion). Solo
+      # en true cuando el servicio de notificaciones ya escucha ese correo: si no, el mensaje se
+      # queda primero en el outbox y frena todos los correos que vienen detrás.
+      SECURITY_ACCOUNT_DELETION_CODE_MAIL_ENABLED: ${SECURITY_ACCOUNT_DELETION_CODE_MAIL_ENABLED:-false}
       RABBITMQ_HOST: rabbitmq
       RABBITMQ_USERNAME: ${RABBITMQ_USERNAME:-energy-monitor}
       RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:?RABBITMQ_PASSWORD is required}

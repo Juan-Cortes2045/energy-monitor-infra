@@ -21,7 +21,8 @@
 # servicio de dispositivos (8084), /api/v1/measurements/**, /api/v1/consumption-levels/** y
 # /api/v1/homes/*/consumption/** al servicio de mediciones (8085), el resto de /api/v1/homes/** y
 # /api/v1/home-types/** al servicio de hogares (8086), /api/v1/notifications/** y
-# /api/v1/admin/notifications/** al servicio de notificaciones (8087) y el resto de /api/v1/** a
+# /api/v1/admin/notifications/** al servicio de notificaciones (8087), /api/v1/alerts/** al
+# servicio de alertas (8088) y el resto de /api/v1/** a
 # energy-monitor-backend (8083). Los servicios no publican puertos: solo se alcanzan por la red de
 # Docker, asi que /internal/** nunca queda expuesto. El gateway publica 8080 para la app movil y
 # rechaza /internal/**.
@@ -344,6 +345,57 @@ services:
     stop_grace_period: 30s
     restart: unless-stopped
 
+  # Alertas: crea las alertas de umbral, de limite de consumo, de conectividad y de dispositivo
+  # vinculado a partir de las lecturas (measurement.recorded) y de los eventos de dispositivos, y las
+  # anuncia (alert.raised) al servicio de notificaciones. Solo recibe public.pem.
+  alert:
+    build:
+      context: ${ALERT_CONTEXT:-../backend/en-monitor-alert-service}
+    image: energy-monitor-alert:local
+    container_name: energy-monitor-alert
+    depends_on:
+      mysql:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    environment:
+      # Cualquier perfil distinto de "local" (el de application-local.yaml).
+      SPRING_PROFILES_ACTIVE: prod
+      # La misma base que los otros servicios: aplica solo los changesets alert-*. El backend ya
+      # aplico alert-001 a alert-003; este servicio crea alert_outbox (alert-004).
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/energy_monitor?connectionTimeZone=UTC&forceConnectionTimeZoneToSession=true
+      SPRING_DATASOURCE_USERNAME: energy_app
+      SPRING_DATASOURCE_PASSWORD: ${MYSQL_PASSWORD:?MYSQL_PASSWORD is required}
+      SECURITY_JWT_PUBLIC_KEY_PATH: /run/keys/public.pem
+      INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:?INTERNAL_API_TOKEN is required}
+      # Quien puede leer las alertas de un hogar y sus limites; el hogar de un dispositivo; los
+      # niveles de consumo y la energia de los dispositivos.
+      HOME_SERVICE_URL: http://home:8086
+      DEVICE_SERVICE_URL: http://device:8084
+      MEASUREMENT_SERVICE_URL: http://measurement:8085
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_USERNAME: ${RABBITMQ_USERNAME:-energy-monitor}
+      RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:?RABBITMQ_PASSWORD is required}
+      # Crear las alertas desde sus colas (alert-service.measurement.recorded y
+      # alert-service.device.events). Apagado mientras energy-monitor-backend las siga creando: con
+      # los dos encendidos cada alerta se crearia dos veces. Las colas existen igual y acumulan; ver
+      # "Servicio de alertas" en el README antes de encenderlo.
+      ALERT_CONSUMERS_ENABLED: ${ALERT_CONSUMERS_ENABLED:-false}
+      # Publica alert_outbox (alert.raised). Otro nombre que ALERT_OUTBOX_RELAY_ENABLED, que es el
+      # outbox del backend.
+      ALERT_OUTBOX_RELAY_ENABLED: ${ALERT_SERVICE_OUTBOX_RELAY_ENABLED:-true}
+      ALERT_LIMIT_ZONE: ${ALERT_LIMIT_ZONE:-America/Bogota}
+    volumes:
+      - ./keys/public.pem:/run/keys/public.pem:ro
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8088/actuator/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 120s
+    stop_grace_period: 30s
+    restart: unless-stopped
+
   backend:
     build:
       context: ${BACKEND_CONTEXT:-../backend/energy-monitor-backend}
@@ -407,6 +459,8 @@ services:
         condition: service_started
       notification:
         condition: service_started
+      alert:
+        condition: service_started
       backend:
         condition: service_started
     environment:
@@ -419,6 +473,7 @@ services:
       MEASUREMENT_SERVICE_URL: http://measurement:8085
       HOME_SERVICE_URL: http://home:8086
       NOTIFICATION_SERVICE_URL: http://notification:8087
+      ALERT_SERVICE_URL: http://alert:8088
       BACKEND_URL: http://backend:8083
     ports:
       # La app movil (APK) en la LAN llama directo al gateway: http://<IP de LAN>:8080

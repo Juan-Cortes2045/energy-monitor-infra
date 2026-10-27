@@ -26,15 +26,18 @@ red Docker: energy-monitor
                                          │  /api/v1/homes/*/consumption/** ─────────────────► measurement :8085
                                          ├─ resto de /api/v1/homes/**, /api/v1/home-types/** ► home     :8086
                                          ├─ /api/v1/notifications/**, /admin/notifications ──► notification :8087
+                                         ├─ /api/v1/alerts/** ──────────────────────────────► alert    :8088
                                          └─ resto de /api/v1/** ────────────────────────────► backend  :8083
 
   backend :8083 ── /internal/** (INTERNAL_API_TOKEN) ──► device :8084, measurement :8085 y home :8086
   measurement :8085 ◄── /internal/** ──► device :8084
-  backend :8083 ── alert.raised, recommendation.created (rabbitmq) ──► notification :8087
+  backend :8083 ── recommendation.created (rabbitmq) ──► notification :8087
+  alert :8088 ── /internal/** ──► home :8086, device :8084 y measurement :8085
+  measurement.recorded, device.* (rabbitmq) ──► alert :8088 ── alert.raised ──► notification :8087
   home :8086 ◄── /internal/homes/**, /internal/accounts/** ── security, device, measurement, backend
   home :8086 ── /internal/users/profiles ──► security :8082
   notification :8087 ── /internal/** ──► security :8082, home :8086 y device :8084
-  security, device, measurement, home, notification, backend ──► mysql :3306 (misma base)  y  ──► rabbitmq :5672 (eventos, correo)
+  security, device, measurement, home, notification, alert, backend ──► mysql :3306 (misma base)  y  ──► rabbitmq :5672 (eventos, correo)
   mosquitto :1883 / :8883 TLS ── /internal/mqtt/auth ──► device :8084
   device (conectividad, comandos) y measurement (lecturas) ──► mosquitto :1883
 ```
@@ -66,7 +69,7 @@ por la red de Docker y el gateway rechaza `/internal/**`: nunca queda expuesto.
   ```
 
   Otras rutas: `BACKEND_CONTEXT`, `SECURITY_CONTEXT`, `DEVICE_CONTEXT`, `MEASUREMENT_CONTEXT`,
-  `HOME_CONTEXT`, `NOTIFICATION_CONTEXT`, `GATEWAY_CONTEXT` y `FRONTEND_CONTEXT` en `.env`.
+  `HOME_CONTEXT`, `NOTIFICATION_CONTEXT`, `ALERT_CONTEXT`, `GATEWAY_CONTEXT` y `FRONTEND_CONTEXT` en `.env`.
 
 ## Estructura
 
@@ -114,7 +117,7 @@ a través del gateway; la app móvil (APK) en la LAN llama directo al gateway co
 en Windows, permite el puerto 8080 en el firewall para redes privadas). La consola de RabbitMQ
 está en <http://localhost:15672>
 (`RABBITMQ_USERNAME` / `RABBITMQ_PASSWORD`). Swagger de cada servicio: en modo desarrollo
-(`http://localhost:8082/swagger-ui.html`, `:8084`, `:8085`, `:8086`, `:8087` y `:8083`), porque en la pila
+(`http://localhost:8082/swagger-ui.html`, `:8084`, `:8085`, `:8086`, `:8087`, `:8088` y `:8083`), porque en la pila
 completa no publican puertos.
 
 ## Variables de entorno
@@ -186,6 +189,7 @@ Ninguno se versiona. En todos:
 | `EXPO_ACCESS_TOKEN`                                                   | no          | En expo.dev: _Account settings → Access tokens → Create token_. Si está vacía, no hay push en la app móvil. Va solo en el servidor, nunca en la app.                                                                                   |
 | `HOME_OUTBOX_RELAY_ENABLED`, `ACCOUNT_DELETED_CONSUMER_ENABLED`       | no          | `true` (por defecto). `false` solo para volver atrás a un backend que aún tenga su módulo de hogares (ver "Servicio de hogares").                                                                                                       |
 | `SECURITY_EVENTS_CONSUMER_ENABLED`, `ALERT_EVENTS_CONSUMER_ENABLED`, `ALERT_OUTBOX_RELAY_ENABLED` | no | `true` (por defecto). `false` solo para volver atrás a un backend que aún tenga su módulo de notificaciones (ver "Servicio de notificaciones").                                                                                |
+| `ALERT_CONSUMERS_ENABLED`, `ALERT_SERVICE_OUTBOX_RELAY_ENABLED` | no | El primero `false` por defecto: el servicio de alertas no crea alertas hasta el corte (ver "Servicio de alertas"). El segundo `true`. |
 | `*_CONTEXT`                                                           | no          | Solo si los repositorios no están clonados uno al lado del otro (ver "Requisitos").                                                                                                                                                    |
 
 **Contraseña de aplicación de Gmail** (`MAIL_PASSWORD`). Tu contraseña normal de Gmail no sirve
@@ -328,13 +332,14 @@ Para trabajar los servicios desde el IDE o con `./mvnw spring-boot:run` / `./mvn
 solo MySQL, RabbitMQ y el broker, y cada servicio en su terminal:
 
 ```bash
-docker compose stop gateway security device measurement home notification backend frontend    # si la pila completa estaba arriba
+docker compose stop gateway security device measurement home notification alert backend frontend    # si la pila completa estaba arriba
 docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d mysql rabbitmq mosquitto
 cd ../backend/en-monitor-security-service && ./mvnw spring-boot:run   # :8082
 cd ../backend/en-monitor-device-service   && ./mvnw spring-boot:run   # :8084
 cd ../backend/en-monitor-measurement-service && ./mvnw spring-boot:run   # :8085
 cd ../backend/en-monitor-home-service     && ./mvnw spring-boot:run   # :8086
 cd ../backend/en-monitor-notification-service && ./mvnw spring-boot:run   # :8087
+cd ../backend/en-monitor-alert-service && ./mvnw spring-boot:run   # :8088
 cd ../backend/energy-monitor-backend      && ./mvnw spring-boot:run   # :8083
 cd ../backend/en-monitor-api-gateway      && ./mvnw spring-boot:run   # :8080
 ```
@@ -594,6 +599,64 @@ detrás.
 que basta con desplegarlas. Para dejar de entregar la actividad sin bajar de versión, pon
 `ACTIVITY_CONSUMER_ENABLED=false` en `.env.prod` y `deploy/deploy.sh infra`; **antes** borra la cola
 y su `.dlq` (`rabbitmqctl delete_queue`), o se llenaría con cada evento.
+
+### Servicio de alertas
+
+`alert` crea las alertas de un hogar —una lectura sobre el umbral de potencia (HIGH/CRITICAL), el
+límite de consumo del hogar alcanzado, un dispositivo que perdió la conexión y la primera lectura de
+un dispositivo recién vinculado— y las anuncia (`alert.raised`) al servicio de notificaciones, que
+las entrega. El gateway le manda `/api/v1/alerts/**`, con las mismas rutas y respuestas que tenía el
+backend. Pregunta a hogares (quién es miembro y los límites), a dispositivos (el hogar de un
+dispositivo) y a mediciones (niveles de consumo y energía). Usa la tabla `alert`, la misma que el
+backend, y su propio outbox, `alert_outbox` (changeset `alert-004`).
+
+| Variable | Servicio | Qué enciende |
+|---|---|---|
+| `ALERT_CONSUMERS_ENABLED` | alert | Colas `alert-service.measurement.recorded` y `alert-service.device.events`: crear las alertas. **Apagado** por defecto |
+| `ALERT_SERVICE_OUTBOX_RELAY_ENABLED` | alert | Publica `alert.raised` desde `alert_outbox`. Encendido por defecto |
+
+Las dos colas se declaran siempre al arrancar, con el interruptor apagado también: así acumulan las
+lecturas y los eventos de dispositivos mientras el backend todavía crea las alertas desde las suyas.
+Con los dos creándolas, cada alerta saldría dos veces.
+
+**Primer despliegue con el servicio de alertas** (el backend sigue creando las alertas):
+
+1. Respaldo de MySQL (`deploy/backup-mysql.sh`).
+2. Clona `en-monitor-alert-service` en `backend/` (`-b main`) y agrega a `.env.prod`
+   `ALERT_CONTEXT`. No necesita secretos nuevos: usa `MYSQL_PASSWORD`, `RABBITMQ_*`,
+   `INTERNAL_API_TOKEN` y la llave pública que ya tienen los otros servicios.
+3. `deploy/deploy.sh infra`: construye `alert` con los consumidores apagados. Los changesets
+   `alert-001` a `alert-003` ya aplicados por el backend se reconocen en `DATABASECHANGELOG`; solo
+   se ejecuta `alert-004` (crea `alert_outbox`).
+4. `deploy/deploy.sh gateway`, con `/api/v1/alerts/**` al servicio. **Después** del paso 3: con el
+   gateway nuevo y sin el contenedor, las alertas responden 503. Las dos versiones leen la misma
+   tabla, así que la web y la app ven las mismas alertas.
+
+**Corte**, cuando `main` del backend ya no tenga el módulo de alertas:
+
+1. Respaldo de MySQL (`deploy/backup-mysql.sh`).
+2. Vacía las colas del servicio. Lo que guardan ya lo procesó el backend, y una lectura vieja podría
+   volver a crear una alerta que ya se resolvió:
+
+   ```bash
+   for q in alert-service.measurement.recorded alert-service.device.events; do
+     docker compose -f docker-compose.prod.yml --env-file .env.prod exec rabbitmq \
+       rabbitmqctl purge_queue "$q"
+   done
+   ```
+
+3. Enseguida `deploy/deploy.sh backend`, el backend sin módulo de alertas. Desde aquí nadie crea
+   alertas, pero no se pierde nada: las colas del servicio guardan lo que va llegando.
+4. Pon `ALERT_CONSUMERS_ENABLED=true` en `.env.prod` y `deploy/deploy.sh infra`: el servicio
+   procesa lo que se acumuló desde el paso 3 y sigue. Solo lo que llegó entre los pasos 2 y 3 lo
+   procesan los dos; una alerta que el backend dejó pendiente no se repite, porque las reglas
+   miran la misma tabla.
+5. Si el backend dejó de consumir sus colas `energy-monitor-backend.measurement.recorded` y
+   `energy-monitor-backend.device.events`, bórralas con su `.dlq` (`rabbitmqctl delete_queue`), o
+   se llenarían con cada lectura.
+
+**Volver atrás:** `ALERT_CONSUMERS_ENABLED=false` en `.env.prod`, `deploy/deploy.sh infra` y
+despliega una versión del backend con el módulo de alertas. El gateway puede quedar como está.
 
 ## CI/CD con GitHub Actions
 

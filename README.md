@@ -651,9 +651,22 @@ Con los dos creándolas, cada alerta saldría dos veces.
    procesa lo que se acumuló desde el paso 3 y sigue. Solo lo que llegó entre los pasos 2 y 3 lo
    procesan los dos; una alerta que el backend dejó pendiente no se repite, porque las reglas
    miran la misma tabla.
-5. Si el backend dejó de consumir sus colas `energy-monitor-backend.measurement.recorded` y
-   `energy-monitor-backend.device.events`, bórralas con su `.dlq` (`rabbitmqctl delete_queue`), o
-   se llenarían con cada lectura.
+5. El backend sin alertas ya no consume `energy-monitor-backend.measurement.recorded`: bórrala
+   con su `.dlq`, o se llenaría con cada lectura. Su cola `energy-monitor-backend.device.events`
+   sigue (escucha los vínculos para las recomendaciones), pero RabbitMQ conserva las uniones a
+   `device.connectivity-*` de la versión anterior: bórrala también y reinicia el backend, que la
+   declara de nuevo solo con `device.linked` y `device.unlinked`. Mientras tanto descarta esos
+   eventos sin error.
+
+   ```bash
+   for q in energy-monitor-backend.measurement.recorded energy-monitor-backend.device.events; do
+     for s in "" .dlq; do
+       docker compose -f docker-compose.prod.yml --env-file .env.prod exec rabbitmq \
+         rabbitmqctl delete_queue "$q$s"
+     done
+   done
+   docker compose -f docker-compose.prod.yml --env-file .env.prod restart backend
+   ```
 
 **Volver atrás:** `ALERT_CONSUMERS_ENABLED=false` en `.env.prod`, `deploy/deploy.sh infra` y
 despliega una versión del backend con el módulo de alertas. El gateway puede quedar como está.

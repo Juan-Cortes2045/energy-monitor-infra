@@ -27,17 +27,20 @@ red Docker: energy-monitor
                                          ├─ resto de /api/v1/homes/**, /api/v1/home-types/** ► home     :8086
                                          ├─ /api/v1/notifications/**, /admin/notifications ──► notification :8087
                                          ├─ /api/v1/alerts/** ──────────────────────────────► alert    :8088
+                                         ├─ /api/v1/recommendations/** ─────────────────────► recommendation :8089
                                          └─ resto de /api/v1/** ────────────────────────────► backend  :8083
 
   backend :8083 ── /internal/** (INTERNAL_API_TOKEN) ──► device :8084, measurement :8085 y home :8086
   measurement :8085 ◄── /internal/** ──► device :8084
-  backend :8083 ── recommendation.created (rabbitmq) ──► notification :8087
+  recommendation :8089 ── /internal/** ──► home :8086, device :8084 y measurement :8085
+  recommendation :8089 ── recommendation.created (rabbitmq) ──► notification :8087
+  backend :8083 ── recommendation.created (rabbitmq) ──► notification :8087   (hasta el corte)
   alert :8088 ── /internal/** ──► home :8086, device :8084 y measurement :8085
   measurement.recorded, device.* (rabbitmq) ──► alert :8088 ── alert.raised ──► notification :8087
   home :8086 ◄── /internal/homes/**, /internal/accounts/** ── security, device, measurement, backend
   home :8086 ── /internal/users/profiles ──► security :8082
   notification :8087 ── /internal/** ──► security :8082, home :8086 y device :8084
-  security, device, measurement, home, notification, alert, backend ──► mysql :3306 (misma base)  y  ──► rabbitmq :5672 (eventos, correo)
+  security, device, measurement, home, notification, alert, recommendation, backend ──► mysql :3306 (misma base)  y  ──► rabbitmq :5672 (eventos, correo)
   mosquitto :1883 / :8883 TLS ── /internal/mqtt/auth ──► device :8084
   device (conectividad, comandos) y measurement (lecturas) ──► mosquitto :1883
 ```
@@ -69,7 +72,7 @@ por la red de Docker y el gateway rechaza `/internal/**`: nunca queda expuesto.
   ```
 
   Otras rutas: `BACKEND_CONTEXT`, `SECURITY_CONTEXT`, `DEVICE_CONTEXT`, `MEASUREMENT_CONTEXT`,
-  `HOME_CONTEXT`, `NOTIFICATION_CONTEXT`, `ALERT_CONTEXT`, `GATEWAY_CONTEXT` y `FRONTEND_CONTEXT` en `.env`.
+  `HOME_CONTEXT`, `NOTIFICATION_CONTEXT`, `ALERT_CONTEXT`, `RECOMMENDATION_CONTEXT`, `GATEWAY_CONTEXT` y `FRONTEND_CONTEXT` en `.env`.
 
 ## Estructura
 
@@ -117,7 +120,7 @@ a través del gateway; la app móvil (APK) en la LAN llama directo al gateway co
 en Windows, permite el puerto 8080 en el firewall para redes privadas). La consola de RabbitMQ
 está en <http://localhost:15672>
 (`RABBITMQ_USERNAME` / `RABBITMQ_PASSWORD`). Swagger de cada servicio: en modo desarrollo
-(`http://localhost:8082/swagger-ui.html`, `:8084`, `:8085`, `:8086`, `:8087`, `:8088` y `:8083`), porque en la pila
+(`http://localhost:8082/swagger-ui.html`, `:8084`, `:8085`, `:8086`, `:8087`, `:8088`, `:8089` y `:8083`), porque en la pila
 completa no publican puertos.
 
 ## Variables de entorno
@@ -190,6 +193,7 @@ Ninguno se versiona. En todos:
 | `HOME_OUTBOX_RELAY_ENABLED`, `ACCOUNT_DELETED_CONSUMER_ENABLED`       | no          | `true` (por defecto). `false` solo para volver atrás a un backend que aún tenga su módulo de hogares (ver "Servicio de hogares").                                                                                                       |
 | `SECURITY_EVENTS_CONSUMER_ENABLED`, `ALERT_EVENTS_CONSUMER_ENABLED`, `ALERT_OUTBOX_RELAY_ENABLED` | no | `true` (por defecto). `false` solo para volver atrás a un backend que aún tenga su módulo de notificaciones (ver "Servicio de notificaciones").                                                                                |
 | `ALERT_CONSUMERS_ENABLED`, `ALERT_SERVICE_OUTBOX_RELAY_ENABLED` | no | El primero `false` por defecto: el servicio de alertas no crea alertas hasta el corte (ver "Servicio de alertas"). El segundo `true`. |
+| `RECOMMENDATION_SCHEDULER_ENABLED`, `RECOMMENDATION_OUTBOX_RELAY_ENABLED` | no | El primero `false` por defecto: el servicio de recomendaciones no evalúa hasta el corte (ver "Servicio de recomendaciones"). El segundo `true`. |
 | `*_CONTEXT`                                                           | no          | Solo si los repositorios no están clonados uno al lado del otro (ver "Requisitos").                                                                                                                                                    |
 
 **Contraseña de aplicación de Gmail** (`MAIL_PASSWORD`). Tu contraseña normal de Gmail no sirve
@@ -332,7 +336,7 @@ Para trabajar los servicios desde el IDE o con `./mvnw spring-boot:run` / `./mvn
 solo MySQL, RabbitMQ y el broker, y cada servicio en su terminal:
 
 ```bash
-docker compose stop gateway security device measurement home notification alert backend frontend    # si la pila completa estaba arriba
+docker compose stop gateway security device measurement home notification alert recommendation backend frontend    # si la pila completa estaba arriba
 docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d mysql rabbitmq mosquitto
 cd ../backend/en-monitor-security-service && ./mvnw spring-boot:run   # :8082
 cd ../backend/en-monitor-device-service   && ./mvnw spring-boot:run   # :8084
@@ -340,6 +344,7 @@ cd ../backend/en-monitor-measurement-service && ./mvnw spring-boot:run   # :8085
 cd ../backend/en-monitor-home-service     && ./mvnw spring-boot:run   # :8086
 cd ../backend/en-monitor-notification-service && ./mvnw spring-boot:run   # :8087
 cd ../backend/en-monitor-alert-service && ./mvnw spring-boot:run   # :8088
+cd ../backend/en-monitor-recommendation-service && ./mvnw spring-boot:run   # :8089
 cd ../backend/energy-monitor-backend      && ./mvnw spring-boot:run   # :8083
 cd ../backend/en-monitor-api-gateway      && ./mvnw spring-boot:run   # :8080
 ```
@@ -670,6 +675,63 @@ Con los dos creándolas, cada alerta saldría dos veces.
 
 **Volver atrás:** `ALERT_CONSUMERS_ENABLED=false` en `.env.prod`, `deploy/deploy.sh infra` y
 despliega una versión del backend con el módulo de alertas. El gateway puede quedar como está.
+
+### Servicio de recomendaciones
+
+`recommendation` revisa cada hora la energía por hora de los hogares cuyos dispositivos reportaron
+en la última semana y guarda una recomendación cuando una regla se cumple: la mayor parte de la
+energía en el pico de la tarde, un dispositivo consumiendo de noche, una semana muy por encima de
+la anterior, un ritmo que supera el límite del hogar o un dispositivo que consume más que antes. El
+mismo consejo no se repite en 7 días. Las anuncia (`recommendation.created`) al servicio de
+notificaciones, y el gateway le manda `/api/v1/recommendations/**`, con las mismas rutas y
+respuestas que tenía el backend. Pregunta a hogares (quién es miembro y el límite), a dispositivos
+(los dispositivos de un hogar y sus nombres) y a mediciones (energía por hora y quién reporta). Usa
+la tabla `recommendation`, la misma que el backend, y su propio outbox, `recommendation_outbox`
+(changeset `recommendation-002`).
+
+| Variable | Servicio | Qué enciende |
+|---|---|---|
+| `RECOMMENDATION_SCHEDULER_ENABLED` | recommendation | La evaluación cada hora. **Apagada** por defecto |
+| `RECOMMENDATION_OUTBOX_RELAY_ENABLED` | recommendation | Publica `recommendation.created` desde `recommendation_outbox`. Encendido por defecto |
+
+Con la evaluación encendida en los dos, el mismo consejo podría guardarse y anunciarse dos veces.
+El servicio no escucha eventos: no hay colas que vaciar en el corte.
+
+**Primer despliegue con el servicio de recomendaciones** (el backend sigue evaluando):
+
+1. Respaldo de MySQL (`deploy/backup-mysql.sh`).
+2. Clona `en-monitor-recommendation-service` en `backend/` (`-b main`) y agrega a `.env.prod`
+   `RECOMMENDATION_CONTEXT`. No necesita secretos nuevos.
+3. `deploy/deploy.sh infra`: construye `recommendation` con la evaluación apagada. El changeset
+   `recommendation-001` ya aplicado por el backend se reconoce en `DATABASECHANGELOG`; solo se
+   ejecuta `recommendation-002` (crea `recommendation_outbox`).
+4. `deploy/deploy.sh gateway`, con `/api/v1/recommendations/**` al servicio. **Después** del paso
+   3: sin el contenedor, las recomendaciones responderían 503. Las dos versiones leen la misma
+   tabla.
+
+**Corte**, que es también el retiro del backend: cuando `main` del backend ya no tenga el módulo de
+recomendaciones y `main` de infra y del gateway ya no tengan el backend:
+
+1. Respaldo de MySQL (`deploy/backup-mysql.sh`).
+2. Comprueba que el backend ya publicó todo su outbox. Lo que quede en `backend_outbox` sin
+   publicar no lo publicará nadie después del corte:
+
+   ```bash
+   docker compose -f docker-compose.prod.yml --env-file .env.prod exec mysql \
+     sh -c 'mysql -uroot -p"$MYSQL_ROOT_PASSWORD" energy_monitor -e "SELECT COUNT(*) FROM backend_outbox WHERE published_at IS NULL AND discarded_at IS NULL"'
+   ```
+
+   Debe dar `0`. Si no baja, `last_error` de esas filas dice por qué.
+3. Pon `RECOMMENDATION_SCHEDULER_ENABLED=true` en `.env.prod` y `deploy/deploy.sh infra`: retira el
+   contenedor `backend` y recrea `recommendation` con la evaluación encendida. La evaluación es
+   cada hora, así que entre los dos no se pierde ninguna.
+4. `deploy/deploy.sh gateway`, sin la ruta al backend.
+5. Borra las colas del backend, que ya no tienen consumidor (`rabbitmqctl delete_queue`, cada una
+   con su `.dlq`): `energy-monitor-backend.device.events` y las que hayan quedado de cortes
+   anteriores.
+
+**Volver atrás:** `RECOMMENDATION_SCHEDULER_ENABLED=false` en `.env.prod` y despliega las
+versiones de infra, gateway y backend anteriores al retiro.
 
 ## CI/CD con GitHub Actions
 

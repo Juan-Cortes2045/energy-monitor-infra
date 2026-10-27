@@ -434,6 +434,8 @@ services:
       # La evaluacion cada hora. Encendida: el backend que tambien evaluaba ya no existe. En false
       # solo para volver atras a ese backend.
       RECOMMENDATION_SCHEDULER_ENABLED: ${RECOMMENDATION_SCHEDULER_ENABLED:-true}
+      # La primera evaluacion tras arrancar; la prueba e2e la acorta.
+      RECOMMENDATION_INITIAL_DELAY: ${RECOMMENDATION_INITIAL_DELAY:-PT2M}
       # Publica recommendation_outbox (recommendation.created).
       RECOMMENDATION_OUTBOX_RELAY_ENABLED: ${RECOMMENDATION_OUTBOX_RELAY_ENABLED:-true}
       RECOMMENDATION_ZONE: ${RECOMMENDATION_ZONE:-America/Bogota}

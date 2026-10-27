@@ -90,6 +90,8 @@ por la red de Docker y el gateway rechaza `/internal/**`: nunca queda expuesto.
 | `e2e/device-flow.sh`                 | sí         | Prueba de punta a punta del servicio de dispositivos sobre la pila local |
 | `e2e/measurement-flow.sh`            | sí         | Prueba de punta a punta del servicio de mediciones sobre la pila local   |
 | `e2e/activity-flow.sh`               | sí         | Prueba de punta a punta de las notificaciones de actividad               |
+| `e2e/alert-flow.sh`                  | sí         | Prueba de punta a punta del servicio de alertas sobre la pila local      |
+| `e2e/recommendation-flow.sh`         | sí         | Prueba de punta a punta del servicio de recomendaciones                  |
 | `deploy/nginx-energy-monitor.conf`   | sí         | Sitio de Nginx del servidor (proxy HTTPS)                                |
 | `deploy/renew-mqtt-cert.sh`          | sí         | Hook de Certbot: copia el certificado del broker y reinicia `mosquitto`  |
 | `deploy/backup-mysql.sh`             | sí         | Respaldo lógico diario de MySQL en el servidor                           |
@@ -923,6 +925,28 @@ punta a punta:
   y se borran una alerta y las resueltas del hogar.
 
 Al final espera las colas del servicio vacías y sin nada en sus `.dlq`, y borra el hogar.
+
+### Prueba de punta a punta (servicio de recomendaciones)
+
+Con la pila arriba, el backend retirado sin correr y el gateway con la ruta de recomendaciones:
+
+```bash
+./e2e/recommendation-flow.sh
+```
+
+Crea una cuenta de prueba (`+e2e-recommendation-…`), un hogar y un módulo de tipo televisor (la
+nevera no cuenta para el consumo en espera). Guarda directo en `measurement` una semana de
+lecturas, una por hora: mucho consumo de 18 a 22 h (hora de Bogotá) y 60 W de madrugada. Luego
+recrea el contenedor con `RECOMMENDATION_INITIAL_DELAY=PT10S` para que evalúe enseguida y
+comprueba:
+- **Reglas:** se guardan exactamente PEAK_HOURS y SAVING (con el módulo y su nombre), sin leer.
+- **Anuncio:** sus dos `recommendation.created` salen de `recommendation_outbox`, y
+  notificaciones los consume sin dejar nada en la `.dlq`.
+- **API por el gateway:** un hogar ajeno da 404, borrar una sin leer da 409, y se marcan como
+  leídas y se borran una a una y todas las leídas del hogar.
+
+Al final borra las lecturas sembradas y el hogar, y deja el contenedor con su espera normal
+(`PT2M`).
 
 ## Solución de problemas
 

@@ -48,6 +48,8 @@ por la red de Docker y el gateway rechaza `/internal/**`: nunca queda expuesto.
 - Docker Engine 24+ con el plugin `docker compose` 2.24 o superior (probado con Docker 29 /
   Compose v5). El modo desarrollo usa la etiqueta `!override`.
 - `openssl` (lo usa `prepare.sh`).
+- `jq`, solo para las pruebas de `e2e/`. En Windows: `winget install jqlang.jq` y abre otra
+  terminal para que tome el PATH.
 - Los repositorios clonados uno al lado del otro:
 
   ```bash
@@ -78,6 +80,7 @@ por la red de Docker y el gateway rechaza `/internal/**`: nunca queda expuesto.
 | `make-admin.sh`                      | sí         | Da el rol global `ADMIN` a una cuenta (`--prod` en el servidor)          |
 | `e2e/device-flow.sh`                 | sí         | Prueba de punta a punta del servicio de dispositivos sobre la pila local |
 | `e2e/measurement-flow.sh`            | sí         | Prueba de punta a punta del servicio de mediciones sobre la pila local   |
+| `e2e/activity-flow.sh`               | sí         | Prueba de punta a punta de las notificaciones de actividad               |
 | `deploy/nginx-energy-monitor.conf`   | sí         | Sitio de Nginx del servidor (proxy HTTPS)                                |
 | `deploy/renew-mqtt-cert.sh`          | sí         | Hook de Certbot: copia el certificado del broker y reinicia `mosquitto`  |
 | `deploy/backup-mysql.sh`             | sí         | Respaldo lógico diario de MySQL en el servidor                           |
@@ -480,13 +483,15 @@ liga su suscripción a la pública, y con otras dejaría de recibir push.
 
 Es el único que atiende los eventos de cuenta y los códigos de correo y que entrega las alertas y
 recomendaciones: el backend ya no tiene módulo de notificaciones. Tres interruptores, encendidos por
-defecto; en `false` solo sirven para volver atrás a un backend que aún tenga el módulo:
+defecto; en `false` solo sirven para volver atrás a un backend que aún tenga el módulo (el cuarto,
+de la actividad, se explica más abajo):
 
 | Variable | Servicio | Qué enciende |
 |---|---|---|
 | `SECURITY_EVENTS_CONSUMER_ENABLED` | notification | Colas `notification-service.notification.account-events` y `.mail`: notificaciones de administrador, limpieza de cuentas borradas y envío de los códigos |
 | `ALERT_EVENTS_CONSUMER_ENABLED` | notification | Colas `notification-service.notification.alert-raised` y `.recommendation-created`: entrega de alertas y recomendaciones |
 | `ALERT_OUTBOX_RELAY_ENABLED` | backend | Publica `alert.raised` y `recommendation.created` desde `backend_outbox` |
+| `ACTIVITY_CONSUMER_ENABLED` | notification | Cola `notification-service.notification.activity`: bienvenida y actividad de hogares y dispositivos |
 
 Con el relay apagado el backend guarda sus eventos en `backend_outbox` sin publicarlos, y los
 publica en orden cuando se enciende.
@@ -540,6 +545,55 @@ backend con su módulo de notificaciones):
 
 **Volver atrás** a un backend con módulo de notificaciones: pon los tres interruptores en `false`
 en `.env.prod`, `deploy/deploy.sh infra` y despliega esa versión del backend.
+
+#### Notificaciones de actividad
+
+Además de las alertas y recomendaciones, el servicio cuenta a cada persona lo que pasó en su cuenta
+y en sus hogares, por los canales que eligió en Configuración (correo y push) y siempre en la
+bandeja de la web y la app (pestaña **Actividad**, con filtro por hogar):
+
+| Evento | Lo publica | A quién le llega |
+|---|---|---|
+| `account.first-signed-in` | security, en el primer ingreso de una cuenta verificada | La cuenta: bienvenida |
+| `home.created` | home | Quien lo creó |
+| `home.member-joined` | home | Quien se unió ("te uniste") y los demás miembros |
+| `home.thresholds-updated` | home | Los miembros, menos quien los cambió |
+| `home.member-left` | home | Los miembros que quedan |
+| `home.member-removed` | home | Quien fue quitado y los demás, menos el propietario que lo quitó |
+| `home.ownership-transferred` | home | El nuevo propietario, el anterior y los demás, cada uno con su texto |
+| `home.deleted` | home | Los miembros que tenía; quien lo borró, con su texto |
+| `device.linked` / `device.unlinked` | device | Los miembros del hogar |
+
+Todo entra por una sola cola, `notification-service.notification.activity` (con su `.dlq`), que el
+servicio declara al arrancar si `ACTIVITY_CONSUMER_ENABLED` no es `false`. Un mensaje repetido se
+descarta por su id. Cada notificación guarda la clave del texto (`activity.home.member-joined.v1`)
+y los nombres de ese momento (`message_params`, changeset `notification-007`): la web y la app la
+traducen al idioma del usuario, y "Se eliminó «Casa»" se sigue leyendo aunque el hogar ya no exista.
+`home.deleted` y `home.ownership-transferred` traen ahora el nombre del hogar y sus miembros; el
+servicio de dispositivos ignora los campos que no conoce.
+
+**Despliegue: primero `notification`, después `security` y `home`.** Los dos publican estos eventos
+desde su outbox, y un outbox se detiene ante un mensaje que ninguna cola recibe: si salen antes de
+que exista la cola, sus demás eventos (`account.deleted`, `home.deleted`, …) quedan esperando
+detrás.
+
+1. Respaldo de MySQL (`deploy/backup-mysql.sh`).
+2. `deploy/deploy.sh notification`: aplica `notification-006` y `notification-007` y declara la cola.
+   Comprueba que existe:
+
+   ```bash
+   docker compose -f docker-compose.prod.yml --env-file .env.prod exec rabbitmq \
+     rabbitmqctl list_queues name messages | grep notification.activity
+   ```
+
+3. `deploy/deploy.sh security` y `deploy/deploy.sh home`, en cualquier orden.
+4. `deploy/deploy.sh frontend`; la app móvil, con su próxima versión. Las dos piden la actividad a
+   `/api/v1/notifications/activity`, que el gateway ya manda al servicio.
+
+**Volver atrás:** las versiones anteriores de seguridad y hogares no publican estos eventos, así
+que basta con desplegarlas. Para dejar de entregar la actividad sin bajar de versión, pon
+`ACTIVITY_CONSUMER_ENABLED=false` en `.env.prod` y `deploy/deploy.sh infra`; **antes** borra la cola
+y su `.dlq` (`rabbitmqctl delete_queue`), o se llenaría con cada evento.
 
 ## CI/CD con GitHub Actions
 
@@ -615,7 +669,7 @@ docker compose up -d --build backend  # reconstruir solo el backend
 ## Verificación
 
 ```bash
-docker compose ps                                                     # gateway, security, device, measurement, home, backend (healthy)
+docker compose ps                                                     # gateway, security, device, measurement, home, notification, backend (healthy)
 curl -s -o /dev/null -w '%{http_code}\n' http://localhost/          # 200 (web)
 curl -s -o /dev/null -w '%{http_code}\n' http://localhost/api/v1/homes  # 401 sin sesión: lo responde el gateway
 curl -s -o /dev/null -w '%{http_code}\n' -X POST -H 'Content-Type: application/json' -d '{}' \
@@ -663,6 +717,24 @@ se suscribe), que la anuncia por su outbox (`measurement.recorded`), que la lect
 la alerta `THRESHOLD` en el backend con el nivel que lee del servicio y la baja la resuelve, que el
 consumo del hogar, el historial, las estadísticas y los niveles responden por el gateway, y que
 `energy-monitor-backend.measurement.recorded` y su `.dlq` quedan vacías. Al final borra el hogar.
+
+### Prueba de punta a punta (notificaciones de actividad)
+
+```bash
+./e2e/activity-flow.sh
+```
+
+Crea tres cuentas de prueba (Ana, Luis y Sara, con el mismo sufijo `+e2e-…`) y recorre cada evento
+de la tabla de "Notificaciones de actividad": la bienvenida del primer ingreso (y que un segundo
+ingreso no la repite), crear el hogar, unirse, cambiar los umbrales, vincular un módulo, salir,
+transferir el hogar, quitar a un miembro y borrarlo. Para cada uno comprueba que llega a quien
+debe, con los nombres guardados, y no a quien no (quien cambió los umbrales, o quien ya no es
+miembro cuando se borra el hogar). Espera a que los outboxes de seguridad, hogares y dispositivos
+queden publicados y la cola de actividad y su `.dlq` vacías, y prueba la bandeja: filtro por hogar,
+marcar una o todas como leídas, eliminar, y que otra cuenta no puede tocarla. Luis y Sara apagan el
+correo y el push al empezar, y la prueba comprueba que no reciben ninguno pero sí ven todo en la
+bandeja. Con `MAIL_HOST` configurado, Ana deja el correo encendido, así que ese buzón recibe unos
+ocho correos de la prueba.
 
 ## Solución de problemas
 

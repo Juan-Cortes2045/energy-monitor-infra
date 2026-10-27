@@ -329,6 +329,10 @@ services:
       # backend que aun lo tenga.
       SECURITY_EVENTS_CONSUMER_ENABLED: ${SECURITY_EVENTS_CONSUMER_ENABLED:-true}
       ALERT_EVENTS_CONSUMER_ENABLED: ${ALERT_EVENTS_CONSUMER_ENABLED:-true}
+      # La bienvenida (account.first-signed-in) y la actividad de hogares y dispositivos (home.*,
+      # device.linked, device.unlinked). Su cola debe existir antes de que seguridad y hogares
+      # publiquen esos eventos: sus outboxes se detienen ante un mensaje que ninguna cola recibe.
+      ACTIVITY_CONSUMER_ENABLED: ${ACTIVITY_CONSUMER_ENABLED:-true}
     volumes:
       - ./keys/public.pem:/run/keys/public.pem:ro
     healthcheck:

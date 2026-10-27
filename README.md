@@ -812,6 +812,31 @@ correo y el push al empezar, y la prueba comprueba que no reciben ninguno pero s
 bandeja. Con `MAIL_HOST` configurado, Ana deja el correo encendido, así que ese buzón recibe unos
 ocho correos de la prueba.
 
+### Prueba de punta a punta (servicio de alertas)
+
+Con la pila como queda después del corte de "Servicio de alertas": el backend sin módulo de
+alertas y el servicio con sus consumidores encendidos. En local, sin tocar `.env`:
+
+```bash
+ALERT_CONSUMERS_ENABLED=true docker compose up -d alert
+./e2e/alert-flow.sh
+```
+
+Crea una cuenta de prueba (`+e2e-alert-…`), un hogar y un módulo. Comprueba que el servicio
+consume sus dos colas y que el backend ya no consume las lecturas. Después recorre una alerta de
+punta a punta:
+- **Umbral:** una lectura alta guardada por mediciones llega por `measurement.recorded` y crea
+  **una** alerta THRESHOLD que apunta a esa lectura, aunque llegue otra lectura alta. Su
+  `alert.raised` sale de `alert_outbox` y notificaciones lo consume sin dejar nada en la `.dlq`. Una
+  lectura baja la resuelve.
+- **Dispositivo vinculado:** la primera lectura crea la alerta DEVICE.
+- **Conectividad:** el estado offline crea una alerta CONNECTIVITY y la telemetría siguiente la
+  resuelve.
+- **API por el gateway:** un hogar ajeno da 404, marcar como leída una alerta del sistema da 409,
+  y se borran una alerta y las resueltas del hogar.
+
+Al final espera las colas del servicio vacías y sin nada en sus `.dlq`, y borra el hogar.
+
 ## Solución de problemas
 
 - **`required variable X is missing a value: X is required`** al levantar la pila: `X` está vacía

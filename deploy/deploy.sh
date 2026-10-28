@@ -2,11 +2,11 @@
 # =============================================================================
 # EnergyMonitor - Despliegue de un componente en el servidor (lo llama GitHub Actions)
 # =============================================================================
-# Uso:   deploy.sh backend|security|device|measurement|gateway|frontend|infra
+# Uso:   deploy.sh security|device|measurement|home|notification|alert|recommendation|gateway|frontend|infra
 #
 # GitHub Actions entra por SSH con una llave restringida en authorized_keys a este script:
 #   command="/opt/energy-monitor/infra/deploy/deploy.sh",no-port-forwarding,no-agent-forwarding,no-X11-forwarding,no-pty ssh-ed25519 AAAA... github-actions
-# El argumento llega en SSH_ORIGINAL_COMMAND y solo se aceptan los siete nombres de arriba:
+# El argumento llega en SSH_ORIGINAL_COMMAND y solo se aceptan los diez nombres de arriba:
 # esa llave no sirve para abrir una consola ni para ejecutar otra cosa.
 #
 # Pasos: respaldo de MySQL, git pull de DEPLOY_BRANCH (main) en el repositorio del
@@ -21,14 +21,17 @@ HEALTH_TIMEOUT_S="${HEALTH_TIMEOUT_S:-300}"
 # Con la llave restringida el argumento llega en SSH_ORIGINAL_COMMAND; a mano, como $1.
 target="${1:-${SSH_ORIGINAL_COMMAND:-}}"
 case "$target" in
-  backend)  repo="$EM/backend/energy-monitor-backend";      service=backend ;;
   security) repo="$EM/backend/en-monitor-security-service"; service=security ;;
   device)   repo="$EM/backend/en-monitor-device-service";   service=device ;;
   measurement) repo="$EM/backend/en-monitor-measurement-service"; service=measurement ;;
+  home)     repo="$EM/backend/en-monitor-home-service";       service=home ;;
+  notification) repo="$EM/backend/en-monitor-notification-service"; service=notification ;;
+  alert)    repo="$EM/backend/en-monitor-alert-service";      service=alert ;;
+  recommendation) repo="$EM/backend/en-monitor-recommendation-service"; service=recommendation ;;
   gateway)  repo="$EM/backend/en-monitor-api-gateway";      service=gateway ;;
   frontend) repo="$EM/frontend/energy-monitor-web";         service=frontend ;;
   infra)    repo="$EM/infra";                               service="" ;;
-  *) echo "Uso: deploy.sh backend|security|device|measurement|gateway|frontend|infra (recibido: '$target')" >&2; exit 2 ;;
+  *) echo "Uso: deploy.sh security|device|measurement|home|notification|alert|recommendation|gateway|frontend|infra (recibido: '$target')" >&2; exit 2 ;;
 esac
 
 compose=(docker compose --project-directory "$EM/infra" -f "$EM/infra/docker-compose.prod.yml"
@@ -52,7 +55,8 @@ healthy() {
   local deadline=$((SECONDS + HEALTH_TIMEOUT_S))
   while ((SECONDS < deadline)); do
     if container_healthy security && container_healthy device && container_healthy measurement &&
-       container_healthy backend && container_healthy gateway &&
+       container_healthy home && container_healthy notification && container_healthy alert &&
+       container_healthy recommendation && container_healthy gateway &&
        [[ "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8081/)" == 200 ]] &&
        # La API de punta a punta: nginx del frontend -> gateway, que pide token.
        [[ "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8081/api/v1/homes)" == 401 ]]; then
@@ -102,7 +106,7 @@ log "FALLO la prueba de salud: volviendo a ${before:0:7}"
 if [[ -n "$service" ]]; then
   "${compose[@]}" logs --tail 80 "$service" || true
 else
-  "${compose[@]}" logs --tail 40 security device measurement backend gateway || true
+  "${compose[@]}" logs --tail 40 security device measurement home notification alert recommendation gateway || true
 fi
 git -C "$repo" checkout --quiet "$before"
 apply

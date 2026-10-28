@@ -5,10 +5,10 @@
 # Uso, con la pila arriba (docker compose up -d --build) y todo (healthy):
 #   ./e2e/device-flow.sh
 #
-# Recorre lo que cruza los servicios: cuenta (security) -> hogar (backend) -> vincular un modulo
-# (device, que pregunta al backend) -> el modulo entra al broker (Mosquitto pregunta a device) ->
+# Recorre lo que cruza los servicios: cuenta (security) -> hogar (home) -> vincular un modulo
+# (device, que pregunta a home) -> el modulo entra al broker (Mosquitto pregunta a device) ->
 # telemetria (device la marca ONLINE, mediciones guarda la lectura) -> estado offline (evento
-# device.connectivity-lost -> alerta CONNECTIVITY en el backend) -> borrar el hogar (home.deleted
+# device.connectivity-lost -> alerta CONNECTIVITY en el servicio de alertas) -> borrar el hogar (home.deleted
 # -> device desvincula el modulo). Tambien comprueba lo que debe rechazarse.
 #
 # Crea una cuenta (MAIL_USERNAME+e2e-...) y un hogar de prueba; al final borra el hogar. No imprime
@@ -41,6 +41,17 @@ mysql_q() {
   "${compose[@]}" exec -T -e MYSQL_PWD="$(grep '^MYSQL_PASSWORD=' "$here/.env" | cut -d= -f2-)" mysql \
     mysql -N -B -uenergy_app energy_monitor -e "$1"; }
 
+# El código que el servicio de seguridad manda por correo, calculado como él lo hace
+# (EmailVerificationService): HMAC-SHA256 con el pepper sobre el id que reserva la solicitud de
+# registro, la dirección y la ventana de 15 minutos, reducido a seis dígitos.
+verification_code() { # email
+  local email="${1,,}" id pepper digest
+  id="$(mysql_q "SELECT id_user FROM pending_registration WHERE email = '$email'")"
+  pepper="$(grep '^SECURITY_RESET_PEPPER=' "$here/.env" | cut -d= -f2-)"
+  digest="$(printf '%s' "$id:email-verification:$email:$(( $(date +%s) / 900 ))" \
+    | openssl dgst -sha256 -hmac "$pepper" -r | cut -c1-12)"
+  printf '%06d' $(( 16#$digest % 1000000 )); }
+
 echo "1. Rutas del gateway"
 check "/api/v1/homes sin token" 401 "$(status "$API/homes")"
 check "/api/v1/appliance-types sin token" 401 "$(status "$API/appliance-types")"
@@ -54,22 +65,27 @@ echo "2. Cuenta y hogar"
 mail_user="$(grep '^MAIL_USERNAME=' "$here/.env" | cut -d= -f2-)"
 [[ "$mail_user" == *@* ]] || { echo "Falta MAIL_USERNAME en .env (la prueba registra una cuenta con ese dominio)"; exit 1; }
 email="${mail_user%@*}+e2e-$(date +%s)@${mail_user#*@}"; password='E2e-Pass-2026!'
-check "registro (security)" 201 "$(status -X POST -H 'Content-Type: application/json' \
-  -d "{\"email\":\"$email\",\"password\":\"$password\",\"name\":\"E2E\",\"lastName\":\"Device\"}" "$API/auth/register")"
+check "registro (security): solicitud aceptada" 202 "$(status -X POST -H 'Content-Type: application/json' \
+  -d "{\"email\":\"$email\",\"password\":\"$password\",\"name\":\"E2E\",\"lastName\":\"Device\",\"acceptTerms\":true}" "$API/auth/register")"
 check "sin verificar el correo no hay sesión" 403 "$(status -X POST -H 'Content-Type: application/json' \
   -d "{\"email\":\"$email\",\"password\":\"$password\"}" "$API/auth/login")"
-# El código de verificación llega por correo; la prueba marca la dirección como verificada en la
-# base, como si se hubiera escrito el código.
-mysql_q "UPDATE user SET email_verified = 1 WHERE email = '$email' AND deleted_at IS NULL"
+check "sin verificar no hay cuenta en la base" 0 \
+  "$(mysql_q "SELECT COUNT(*) FROM user WHERE email = '${email,,}'")"
+# El código llega por correo; la prueba lo calcula como el servicio y lo verifica por la API, que es
+# cuando se crea la cuenta.
+check "verificar el correo crea la cuenta" 200 "$(status -X POST -H 'Content-Type: application/json' \
+  -d "{\"email\":\"$email\",\"code\":\"$(verification_code "$email")\"}" "$API/auth/email/verify")"
+check "la solicitud de registro ya no existe" 0 \
+  "$(mysql_q "SELECT COUNT(*) FROM pending_registration WHERE email = '${email,,}'")"
 token="$(curl -fsS -X POST -H 'Content-Type: application/json' \
   -d "{\"email\":\"$email\",\"password\":\"$password\"}" "$API/auth/login" | jq -r .accessToken)"
 auth=(-H "Authorization: Bearer $token")
 home_type="$(get /home-types | jq -r '.[0].idHomeType')"
 home="$(curl -fsS "${auth[@]}" -X POST -H 'Content-Type: application/json' \
   -d "{\"name\":\"Casa E2E\",\"homeTypeId\":\"$home_type\",\"address\":\"Calle 1\"}" "$API/homes" | jq -r .idHome)"
-[[ -n "$home" && "$home" != null ]] && ok "hogar creado (backend) $home" || bad "hogar no creado"
+[[ -n "$home" && "$home" != null ]] && ok "hogar creado (home) $home" || bad "hogar no creado"
 
-echo "3. Vincular un modulo (device -> backend /internal/homes/{id}/access)"
+echo "3. Vincular un modulo (device -> home /internal/homes/{id}/access)"
 appliance="$(get /appliance-types | jq -r '.[0].idApplianceType')"
 [[ -n "$appliance" && "$appliance" != null ]] && ok "catalogo de electrodomesticos (device)" || bad "catalogo vacio"
 code="E$(openssl rand -hex 3 | tr 'a-f' 'A-F' | cut -c1-5)"
@@ -95,20 +111,20 @@ mqtt_pub "$code" "$api_key" "$topic/telemetry" \
 eventually "estado ONLINE (device)" ONLINE bash -c "curl -fsS -H 'Authorization: Bearer $token' '$API/homes/$home/devices' | jq -r '.[0].status'"
 eventually "lectura guardada (mediciones)" 140.5 bash -c "curl -fsS -H 'Authorization: Bearer $token' '$API/measurements/latest?deviceId=$device' | jq -r .activePower"
 
-echo "6. Estado offline: device.connectivity-lost -> alerta en el backend"
+echo "6. Estado offline: device.connectivity-lost -> alerta en el servicio de alertas"
 mqtt_pub "$code" "$api_key" "$topic/status" "{\"deviceId\":\"$device\",\"status\":\"offline\"}" \
   && ok "estado offline publicado" || bad "estado offline rechazado"
 eventually "estado OFFLINE (device)" OFFLINE bash -c "curl -fsS -H 'Authorization: Bearer $token' '$API/homes/$home/devices' | jq -r '.[0].status'"
-eventually "alerta CONNECTIVITY (backend)" CONNECTIVITY bash -c \
+eventually "alerta CONNECTIVITY (alert)" CONNECTIVITY bash -c \
   "curl -fsS -H 'Authorization: Bearer $token' '$API/alerts?homeId=$home' | jq -r '[.[] | select(.deviceId == \"$device\") | .type] | map(select(. == \"CONNECTIVITY\")) | .[0]'"
 # Limpia el retenido para no dejar un estado viejo en el broker.
 mqtt_pub "$code" "$api_key" "$topic/status" "" -r >/dev/null 2>&1 || true
 
 echo "7. Borrar el hogar: home.deleted -> device desvincula el modulo"
-check "hogar borrado (backend)" 204 "$(status -X DELETE "${auth[@]}" "$API/homes/$home")"
+check "hogar borrado (home)" 204 "$(status -X DELETE "${auth[@]}" "$API/homes/$home")"
 eventually "modulo desvinculado (device_home.deleted_at)" 1 \
   mysql_q "SELECT COUNT(*) FROM device_home WHERE device_id='$device' AND deleted_at IS NOT NULL"
-eventually "outbox del backend publicado" 0 \
+eventually "outbox de hogares publicado" 0 \
   mysql_q "SELECT COUNT(*) FROM home_outbox WHERE published_at IS NULL AND discarded_at IS NULL"
 eventually "outbox de device publicado" 0 \
   mysql_q "SELECT COUNT(*) FROM device_outbox WHERE published_at IS NULL AND discarded_at IS NULL"

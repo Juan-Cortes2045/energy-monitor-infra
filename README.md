@@ -1,20 +1,23 @@
 # infra — EnergyMonitor en Docker
 
 Todo lo de Docker de EnergyMonitor vive aquí: base de datos MySQL, cola RabbitMQ, broker MQTT
-(Mosquitto), los cuatro servicios Spring Boot (API gateway, servicio de seguridad, servicio de
-dispositivos y backend) y el
-frontend React, en tres modos:
+(Mosquitto), los servicios Spring Boot (API gateway, servicios de seguridad, dispositivos,
+mediciones, hogares, notificaciones, alertas y recomendaciones) y el frontend React, en tres modos.
+El antiguo `energy-monitor-backend` ya no corre: cada módulo pasó a su servicio (las secciones de
+cada servicio, más abajo, cuentan cómo se hizo cada corte).
 
-| Modo | Archivos | Para qué |
-|---|---|---|
-| Pila completa local | `docker-compose.yml` | Correr todo el sistema en este PC (demo, pruebas de punta a punta) |
-| Desarrollo | `docker-compose.yml` + `docker-compose.dev.yml` | Solo MySQL, RabbitMQ y broker; los servicios corren en el PC con `./mvnw` (IDE, tests) |
-| Producción | `docker-compose.prod.yml` + `.env.prod` | Servidor con dominio, Let's Encrypt y proxy HTTPS delante |
+| Modo                | Archivos                                        | Para qué                                                                               |
+| ------------------- | ----------------------------------------------- | -------------------------------------------------------------------------------------- |
+| Pila completa local | `docker-compose.yml`                            | Correr todo el sistema en este PC (demo, pruebas de punta a punta)                     |
+| Desarrollo          | `docker-compose.yml` + `docker-compose.dev.yml` | Solo MySQL, RabbitMQ y broker; los servicios corren en el PC con `./mvnw` (IDE, tests) |
+| Producción          | `docker-compose.prod.yml` + `.env.prod`         | Servidor con dominio, Let's Encrypt y proxy HTTPS delante                              |
 
-Los `Dockerfile` siguen en su repositorio (`backend/energy-monitor-backend`,
-`backend/en-monitor-security-service`, `backend/en-monitor-device-service`,
-`backend/en-monitor-measurement-service`, `backend/en-monitor-api-gateway` y
-`frontend/energy-monitor-web`): cambian con su código, e infra los construye desde ahí.
+Los `Dockerfile` siguen en su repositorio (`backend/en-monitor-security-service`,
+`backend/en-monitor-device-service`, `backend/en-monitor-measurement-service`,
+`backend/en-monitor-home-service`, `backend/en-monitor-notification-service`,
+`backend/en-monitor-alert-service`, `backend/en-monitor-recommendation-service`,
+`backend/en-monitor-api-gateway` y `frontend/energy-monitor-web`): cambian con su código, e infra
+los construye desde ahí.
 
 ```
 red Docker: energy-monitor
@@ -23,61 +26,82 @@ red Docker: energy-monitor
                                          ├─ /api/v1/homes/*/devices/**, /appliance-types ──► device   :8084
                                          ├─ /api/v1/measurements/**, /consumption-levels,
                                          │  /api/v1/homes/*/consumption/** ─────────────────► measurement :8085
-                                         └─ resto de /api/v1/** ────────────────────────────► backend  :8083
+                                         ├─ resto de /api/v1/homes/**, /api/v1/home-types/** ► home     :8086
+                                         ├─ /api/v1/notifications/**, /admin/notifications ──► notification :8087
+                                         ├─ /api/v1/alerts/** ──────────────────────────────► alert    :8088
+                                         ├─ /api/v1/recommendations/** ─────────────────────► recommendation :8089
+                                         └─ resto de /api/v1/** ────────────────────────────► 404
 
-  security :8082 ◄── /internal/** (INTERNAL_API_TOKEN) ──► backend :8083 ◄──► device :8084
-  measurement :8085 ◄── /internal/** ──► backend :8083 y device :8084
-  security, device, measurement, backend ──► mysql :3306 (misma base)  y  ──► rabbitmq :5672 (eventos, correo)
+  measurement :8085 ◄── /internal/** ──► device :8084
+  recommendation :8089 ── /internal/** ──► home :8086, device :8084 y measurement :8085
+  recommendation :8089 ── recommendation.created (rabbitmq) ──► notification :8087
+  alert :8088 ── /internal/** ──► home :8086, device :8084 y measurement :8085
+  measurement.recorded, device.* (rabbitmq) ──► alert :8088 ── alert.raised ──► notification :8087
+  home :8086 ◄── /internal/homes/**, /internal/accounts/** ── security, device, measurement, alert, recommendation
+  home :8086 ── /internal/users/profiles ──► security :8082
+  notification :8087 ── /internal/** ──► security :8082, home :8086 y device :8084
+  security, device, measurement, home, notification, alert, recommendation ──► mysql :3306 (misma base)  y  ──► rabbitmq :5672 (eventos, correo)
   mosquitto :1883 / :8883 TLS ── /internal/mqtt/auth ──► device :8084
   device (conectividad, comandos) y measurement (lecturas) ──► mosquitto :1883
 ```
 
-Solo se publican la web (`:80`), MQTT TLS (`:8883`) y, en `127.0.0.1`, MySQL, AMQP, la consola de
-RabbitMQ y MQTT sin TLS. El gateway y los cuatro servicios solo se alcanzan por la red de Docker: `/internal/**` nunca queda expuesto.
+Solo se publican la web (`:80`), el gateway para la app móvil (`:8080`), MQTT TLS (`:8883`) y, en
+`127.0.0.1`, MySQL, AMQP, la consola de RabbitMQ y MQTT sin TLS. Los servicios solo se alcanzan
+por la red de Docker y el gateway rechaza `/internal/**`: nunca queda expuesto.
 
 ## Requisitos
 
 - Docker Engine 24+ con el plugin `docker compose` 2.24 o superior (probado con Docker 29 /
   Compose v5). El modo desarrollo usa la etiqueta `!override`.
 - `openssl` (lo usa `prepare.sh`).
+- `jq`, solo para las pruebas de `e2e/`. En Windows: `winget install jqlang.jq` y abre otra
+  terminal para que tome el PATH.
 - Los repositorios clonados uno al lado del otro:
 
   ```bash
   mkdir energy-monitor && cd energy-monitor
   git clone https://github.com/Juan-Cortes2045/energy-monitor-infra.git infra
+  # Ya no corre, pero guarda el firmware del ESP32: prepare.sh le escribe dev_ca.h.
   git clone https://github.com/Juan-Cortes2045/energy-monitor-backend.git backend/energy-monitor-backend
   git clone https://github.com/Juan-Cortes2045/en-monitor-security-service.git backend/en-monitor-security-service
   git clone https://github.com/Juan-Cortes2045/en-monitor-device-service.git backend/en-monitor-device-service
   git clone https://github.com/Juan-Cortes2045/en-monitor-measurement-service.git backend/en-monitor-measurement-service
+  git clone https://github.com/angelgarcia0/en-monitor-home-service.git backend/en-monitor-home-service
+  git clone https://github.com/angelgarcia0/en-monitor-notification-service.git backend/en-monitor-notification-service
+  git clone https://github.com/angelgarcia0/en-monitor-alert-service.git backend/en-monitor-alert-service
+  git clone https://github.com/angelgarcia0/en-monitor-recommendation-service.git backend/en-monitor-recommendation-service
   git clone https://github.com/Juan-Cortes2045/en-monitor-api-gateway.git backend/en-monitor-api-gateway
   git clone https://github.com/Juan-Cortes2045/Energy-Monitor-application.git frontend/energy-monitor-web
   ```
 
-  Otras rutas: `BACKEND_CONTEXT`, `SECURITY_CONTEXT`, `DEVICE_CONTEXT`, `MEASUREMENT_CONTEXT`,
-  `GATEWAY_CONTEXT` y `FRONTEND_CONTEXT` en `.env`.
+  Otras rutas: `SECURITY_CONTEXT`, `DEVICE_CONTEXT`, `MEASUREMENT_CONTEXT`,
+  `HOME_CONTEXT`, `NOTIFICATION_CONTEXT`, `ALERT_CONTEXT`, `RECOMMENDATION_CONTEXT`, `GATEWAY_CONTEXT` y `FRONTEND_CONTEXT` en `.env`.
 
 ## Estructura
 
-| Ruta | Versionado | Contenido |
-|---|---|---|
-| `docker-compose.yml` | sí | Pila completa local |
-| `docker-compose.dev.yml` | sí | Modo desarrollo (se combina con el anterior) |
-| `docker-compose.prod.yml` | sí | Servidor |
-| `.env.example` / `.env.prod.example` | sí | Plantillas de `.env` / `.env.prod` |
-| `prepare.sh` | sí | Claves RSA, `.env` y certificado de desarrollo del broker |
-| `make-admin.sh` | sí | Da el rol global `ADMIN` a una cuenta (`--prod` en el servidor) |
-| `e2e/device-flow.sh` | sí | Prueba de punta a punta del servicio de dispositivos sobre la pila local |
-| `e2e/measurement-flow.sh` | sí | Prueba de punta a punta del servicio de mediciones sobre la pila local |
-| `deploy/nginx-energy-monitor.conf` | sí | Sitio de Nginx del servidor (proxy HTTPS) |
-| `deploy/renew-mqtt-cert.sh` | sí | Hook de Certbot: copia el certificado del broker y reinicia `mosquitto` |
-| `deploy/backup-mysql.sh` | sí | Respaldo lógico diario de MySQL en el servidor |
-| `deploy/deploy.sh` | sí | Despliegue de un componente en el servidor (lo llama GitHub Actions) |
-| `.github/workflows/ci-cd.yml` | sí | Validación de las compose y scripts, y despliegue de infra |
-| `mosquitto/mosquitto.conf` | sí | Configuración del broker (la misma en los tres modos) |
-| `mosquitto/generate-dev-certs.sh` | sí | CA y certificado de desarrollo (lo llama `prepare.sh`) |
-| `mosquitto/certs/` | **no** | CA, certificado y claves privadas del broker |
-| `keys/` | **no** | Par RSA de los JWT (privada: solo el servicio de seguridad) |
-| `.env`, `.env.prod` | **no** | Contraseñas y secretos |
+| Ruta                                 | Versionado | Contenido                                                                |
+| ------------------------------------ | ---------- | ------------------------------------------------------------------------ |
+| `docker-compose.yml`                 | sí         | Pila completa local                                                      |
+| `docker-compose.dev.yml`             | sí         | Modo desarrollo (se combina con el anterior)                             |
+| `docker-compose.prod.yml`            | sí         | Servidor                                                                 |
+| `.env.example` / `.env.prod.example` | sí         | Plantillas de `.env` / `.env.prod`                                       |
+| `prepare.sh`                         | sí         | Claves RSA, `.env` y certificado de desarrollo del broker                |
+| `make-admin.sh`                      | sí         | Da el rol global `ADMIN` a una cuenta (`--prod` en el servidor)          |
+| `e2e/device-flow.sh`                 | sí         | Prueba de punta a punta del servicio de dispositivos sobre la pila local |
+| `e2e/measurement-flow.sh`            | sí         | Prueba de punta a punta del servicio de mediciones sobre la pila local   |
+| `e2e/activity-flow.sh`               | sí         | Prueba de punta a punta de las notificaciones de actividad               |
+| `e2e/alert-flow.sh`                  | sí         | Prueba de punta a punta del servicio de alertas sobre la pila local      |
+| `e2e/recommendation-flow.sh`         | sí         | Prueba de punta a punta del servicio de recomendaciones                  |
+| `deploy/nginx-energy-monitor.conf`   | sí         | Sitio de Nginx del servidor (proxy HTTPS)                                |
+| `deploy/renew-mqtt-cert.sh`          | sí         | Hook de Certbot: copia el certificado del broker y reinicia `mosquitto`  |
+| `deploy/backup-mysql.sh`             | sí         | Respaldo lógico diario de MySQL en el servidor                           |
+| `deploy/deploy.sh`                   | sí         | Despliegue de un componente en el servidor (lo llama GitHub Actions)     |
+| `.github/workflows/ci-cd.yml`        | sí         | Validación de las compose y scripts, y despliegue de infra               |
+| `mosquitto/mosquitto.conf`           | sí         | Configuración del broker (la misma en los tres modos)                    |
+| `mosquitto/generate-dev-certs.sh`    | sí         | CA y certificado de desarrollo (lo llama `prepare.sh`)                   |
+| `mosquitto/certs/`                   | **no**     | CA, certificado y claves privadas del broker                             |
+| `keys/`                              | **no**     | Par RSA de los JWT (privada: solo el servicio de seguridad)              |
+| `.env`, `.env.prod`                  | **no**     | Contraseñas y secretos                                                   |
 
 `generate-dev-certs.sh` escribe además
 `../backend/energy-monitor-backend/firmware/esp32-pzem-monitor/dev_ca.h` (ignorado por git), para
@@ -92,14 +116,17 @@ cp .env.example .env      # y rellénalo: sección "Variables de entorno"
 ./prepare.sh              # genera el par RSA de los JWT y los certificados del broker
 docker compose config -q  # nombra la variable obligatoria que falte, si falta alguna
 docker compose up -d --build
-docker compose ps         # gateway, security, device, measurement y backend deben quedar (healthy)
+docker compose ps         # gateway, security, device, measurement, home, notification, alert y recommendation deben quedar (healthy)
 ```
 
 Luego abre <http://localhost>. La API responde en el mismo origen, <http://localhost/api/v1/...>,
-a través del gateway; la app móvil en la LAN usa `http://<IP de LAN>` como
-`EXPO_PUBLIC_API_BASE_URL`. La consola de RabbitMQ está en <http://localhost:15672>
+a través del gateway; la app móvil (APK) en la LAN llama directo al gateway con
+`EXPO_PUBLIC_API_BASE_URL=http://<IP de LAN>:8080` (la misma IP que `DEVICE_MQTT_PUBLIC_HOST`;
+en Windows, permite el puerto 8080 en el firewall para redes privadas). La consola de RabbitMQ
+está en <http://localhost:15672>
 (`RABBITMQ_USERNAME` / `RABBITMQ_PASSWORD`). Swagger de cada servicio: en modo desarrollo
-(`http://localhost:8082/swagger-ui.html`, `:8084`, `:8085` y `:8083`), porque en la pila completa no publican puertos.
+(`http://localhost:8082/swagger-ui.html`, `:8084`, `:8085`, `:8086`, `:8087`, `:8088` y `:8089`), porque en la pila
+completa no publican puertos.
 
 ## Variables de entorno
 
@@ -152,23 +179,27 @@ Ninguno se versiona. En todos:
 
 ### De dónde sale cada valor
 
-| Variable | Obligatoria | Cómo se obtiene |
-|---|---|---|
-| `MYSQL_PASSWORD`, `MYSQL_ROOT_PASSWORD` | sí | `openssl rand -hex 16`. La primera es la del usuario `energy_app` de los servicios; la segunda, la de `root`. MySQL la toma solo al crear el volumen (ver abajo). |
-| `SECURITY_RESET_PEPPER` | sí | `openssl rand -hex 32`. Protege los códigos de recuperación: si lo cambias, los códigos ya enviados dejan de servir. |
-| `SECURITY_CORS_ALLOWED_ORIGINS`, `NOTIFICATION_WEB_URL` | no | `http://localhost`, el origen de la web en la pila completa. |
-| `BACKEND_UID`, `BACKEND_GID` | no | `id -u` / `id -g`. Los pone `prepare.sh`. |
-| `RABBITMQ_USERNAME`, `RABBITMQ_PASSWORD` | la clave | `energy-monitor` y `openssl rand -hex 24`. RabbitMQ los toma solo al crear el volumen (ver abajo). |
-| `INTERNAL_API_TOKEN` | sí | `openssl rand -hex 32`. Lo comparten seguridad, dispositivos, mediciones y backend en `/internal/**`. |
-| `DEVICE_MQTT_PUBLIC_HOST` | sí | La IP de LAN del PC (`hostname -I`), nunca `localhost`: es la dirección que la web escribe al módulo. Luego `./prepare.sh`. |
-| `DEVICE_MQTT_PUBLIC_PORT` | no | `8883`. |
-| `MQTT_MEASUREMENT_SERVICE_USER/PASS`, `MQTT_DEVICE_SERVICE_USER/PASS` | las claves | Deja los usuarios por defecto y genera cada clave con `openssl rand -hex 24`. El broker no guarda usuarios: los comprueba el servicio de dispositivos. El backend ya no se conecta al broker, así que `MQTT_BACKEND_USER/PASS` sobran. |
-| `MAIL_HOST`, `MAIL_PORT` | no | `smtp.gmail.com` y `587`. |
-| `MAIL_USERNAME`, `MAIL_PASSWORD`, `MAIL_FROM` | no | La cuenta de Gmail y su contraseña de aplicación (ver abajo). En `MAIL_FROM`: `EnergyMonitor <esa cuenta>`. Sin ellas no salen los correos de verificación, recuperación ni alertas. |
-| `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `VITE_GOOGLE_CLIENT_ID` | no | El cliente OAuth de Google (ver abajo). `VITE_GOOGLE_CLIENT_ID` lleva el mismo ID. Si están vacías, no aparece el botón de Google. |
-| `NOTIFICATION_VAPID_PUBLIC_KEY`, `NOTIFICATION_VAPID_PRIVATE_KEY` | no | Comandos de abajo, una vez por entorno. Si están vacías, no hay notificaciones push en el navegador. |
-| `EXPO_ACCESS_TOKEN` | no | En expo.dev: *Account settings → Access tokens → Create token*. Si está vacía, no hay push en la app móvil. Va solo en el servidor, nunca en la app. |
-| `*_CONTEXT` | no | Solo si los repositorios no están clonados uno al lado del otro (ver "Requisitos"). |
+| Variable                                                              | Obligatoria | Cómo se obtiene                                                                                                                                                                                                                        |
+| --------------------------------------------------------------------- | ----------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `MYSQL_PASSWORD`, `MYSQL_ROOT_PASSWORD`                               | sí          | `openssl rand -hex 16`. La primera es la del usuario `energy_app` de los servicios; la segunda, la de `root`. MySQL la toma solo al crear el volumen (ver abajo).                                                                      |
+| `SECURITY_RESET_PEPPER`                                               | sí          | `openssl rand -hex 32`. Protege los códigos de recuperación: si lo cambias, los códigos ya enviados dejan de servir.                                                                                                                   |
+| `SECURITY_CORS_ALLOWED_ORIGINS`, `NOTIFICATION_WEB_URL`               | no          | `http://localhost`, el origen de la web en la pila completa.                                                                                                                                                                           |
+| `BACKEND_UID`, `BACKEND_GID`                                          | no          | `id -u` / `id -g`. Los pone `prepare.sh`.                                                                                                                                                                                              |
+| `RABBITMQ_USERNAME`, `RABBITMQ_PASSWORD`                              | la clave    | `energy-monitor` y `openssl rand -hex 24`. RabbitMQ los toma solo al crear el volumen (ver abajo).                                                                                                                                     |
+| `INTERNAL_API_TOKEN`                                                  | sí          | `openssl rand -hex 32`. Lo comparten seguridad, dispositivos, mediciones, hogares, notificaciones y backend en `/internal/**`.                                                                                                                         |
+| `DEVICE_MQTT_PUBLIC_HOST`                                             | sí          | La IP de LAN del PC (`hostname -I`), nunca `localhost`: es la dirección que la web escribe al módulo. Luego `./prepare.sh`.                                                                                                            |
+| `DEVICE_MQTT_PUBLIC_PORT`                                             | no          | `8883`.                                                                                                                                                                                                                                |
+| `MQTT_MEASUREMENT_SERVICE_USER/PASS`, `MQTT_DEVICE_SERVICE_USER/PASS` | las claves  | Deja los usuarios por defecto y genera cada clave con `openssl rand -hex 24`. El broker no guarda usuarios: los comprueba el servicio de dispositivos. El backend ya no se conecta al broker, así que `MQTT_BACKEND_USER/PASS` sobran. |
+| `MAIL_HOST`, `MAIL_PORT`                                              | no          | `smtp.gmail.com` y `587`.                                                                                                                                                                                                              |
+| `MAIL_USERNAME`, `MAIL_PASSWORD`, `MAIL_FROM`                         | no          | La cuenta de Gmail y su contraseña de aplicación (ver abajo). En `MAIL_FROM`: `EnergyMonitor <esa cuenta>`. Sin ellas no salen los correos de verificación, recuperación ni alertas.                                                   |
+| `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `VITE_GOOGLE_CLIENT_ID`   | no          | El cliente OAuth de Google (ver abajo). `VITE_GOOGLE_CLIENT_ID` lleva el mismo ID. Si están vacías, no aparece el botón de Google.                                                                                                     |
+| `NOTIFICATION_VAPID_PUBLIC_KEY`, `NOTIFICATION_VAPID_PRIVATE_KEY`     | no          | Comandos de abajo, una vez por entorno. Las recibe el servicio de notificaciones: no las cambies, o cada navegador suscrito deja de recibir push. Si están vacías, no hay notificaciones push en el navegador.            |
+| `EXPO_ACCESS_TOKEN`                                                   | no          | En expo.dev: _Account settings → Access tokens → Create token_. Si está vacía, no hay push en la app móvil. Va solo en el servidor, nunca en la app.                                                                                   |
+| `HOME_OUTBOX_RELAY_ENABLED`, `ACCOUNT_DELETED_CONSUMER_ENABLED`       | no          | `true` (por defecto). `false` solo para volver atrás a un backend que aún tenga su módulo de hogares (ver "Servicio de hogares").                                                                                                       |
+| `SECURITY_EVENTS_CONSUMER_ENABLED`, `ALERT_EVENTS_CONSUMER_ENABLED` | no | `true` (por defecto). `false` solo para volver atrás a un backend que aún tenga su módulo de notificaciones (ver "Servicio de notificaciones").                                                                                |
+| `ALERT_CONSUMERS_ENABLED`, `ALERT_SERVICE_OUTBOX_RELAY_ENABLED` | no | `true` (por defecto). `false` solo para volver atrás a un backend que aún cree las alertas (ver "Servicio de alertas"). |
+| `RECOMMENDATION_SCHEDULER_ENABLED`, `RECOMMENDATION_OUTBOX_RELAY_ENABLED` | no | `true` (por defecto). `false` solo para volver atrás a un backend que aún evalúe (ver "Servicio de recomendaciones"). |
+| `*_CONTEXT`                                                           | no          | Solo si los repositorios no están clonados uno al lado del otro (ver "Requisitos").                                                                                                                                                    |
 
 **Contraseña de aplicación de Gmail** (`MAIL_PASSWORD`). Tu contraseña normal de Gmail no sirve
 para SMTP:
@@ -176,20 +207,20 @@ para SMTP:
 1. Con la cuenta que enviará los correos, activa la **Verificación en 2 pasos** en
    <https://myaccount.google.com/security>.
 2. Abre <https://myaccount.google.com/apppasswords>, escribe un nombre (`EnergyMonitor`) y pulsa
-   *Crear*.
+   _Crear_.
 3. Copia los 16 caracteres **sin espacios** en `MAIL_PASSWORD`.
 
 **Cliente OAuth de Google** (`GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`):
 
 1. En <https://console.cloud.google.com>, crea o elige un proyecto.
-2. Abre la pantalla de consentimiento (*Google Auth Platform*, o *APIs y servicios → Pantalla de
-   consentimiento de OAuth*) y elige el tipo *Externo*. Mientras esté en *Testing*, agrega en
-   *Test users* las cuentas que van a probar.
-3. Ve a *Credenciales → Crear credenciales → ID de cliente de OAuth* y elige el tipo **Aplicación
-   web**. En *Orígenes autorizados de JavaScript* agrega `http://localhost` (pila completa) y
+2. Abre la pantalla de consentimiento (_Google Auth Platform_, o _APIs y servicios → Pantalla de
+   consentimiento de OAuth_) y elige el tipo _Externo_. Mientras esté en _Testing_, agrega en
+   _Test users_ las cuentas que van a probar.
+3. Ve a _Credenciales → Crear credenciales → ID de cliente de OAuth_ y elige el tipo **Aplicación
+   web**. En _Orígenes autorizados de JavaScript_ agrega `http://localhost` (pila completa) y
    `http://localhost:5173` (web de Vite en modo desarrollo).
-4. Copia el *ID de cliente* en `GOOGLE_CLIENT_ID` y en `VITE_GOOGLE_CLIENT_ID`, y el *Secreto del
-   cliente* en `GOOGLE_CLIENT_SECRET`. `VITE_GOOGLE_CLIENT_ID` va dentro del build: si lo cambias,
+4. Copia el _ID de cliente_ en `GOOGLE_CLIENT_ID` y en `VITE_GOOGLE_CLIENT_ID`, y el _Secreto del
+   cliente_ en `GOOGLE_CLIENT_SECRET`. `VITE_GOOGLE_CLIENT_ID` va dentro del build: si lo cambias,
    corre `docker compose up -d --build frontend`.
 
 **Claves VAPID** (push en el navegador). Genéralas una vez por entorno; cambiarlas invalida las
@@ -225,15 +256,16 @@ Cada servicio que corre en el PC lee el `.env` de su carpeta, copiado de su `.en
 `application-local.yaml`, copiado de su `.example`. Los valores compartidos son los de
 `infra/.env`. `MYSQL_PASSWORD` cambia de nombre: allí se llama `SPRING_DATASOURCE_PASSWORD`.
 
-| Archivo | Valores de `infra/.env` | Propios del modo desarrollo |
-|---|---|---|
-| `backend/en-monitor-security-service/.env` | `MYSQL_PASSWORD`, `SECURITY_RESET_PEPPER`, `GOOGLE_CLIENT_ID/SECRET`, `RABBITMQ_*`, `INTERNAL_API_TOKEN` | `SECURITY_JWT_PRIVATE_KEY_PATH`, `SECURITY_JWT_PUBLIC_KEY_PATH`, `SECURITY_SESSION_COOKIE_SECURE=false` |
-| `backend/en-monitor-device-service/.env` | `MYSQL_PASSWORD`, `RABBITMQ_*`, `INTERNAL_API_TOKEN`, `MQTT_MEASUREMENT_SERVICE_USER/PASS`, `MQTT_DEVICE_SERVICE_USER/PASS`, `DEVICE_MQTT_PUBLIC_HOST` | `SECURITY_JWT_PUBLIC_KEY_PATH` |
-| `backend/en-monitor-measurement-service/.env` | `MYSQL_PASSWORD`, `RABBITMQ_*`, `INTERNAL_API_TOKEN`, `MQTT_MEASUREMENT_SERVICE_USER/PASS` | `SECURITY_JWT_PUBLIC_KEY_PATH`, `MEASUREMENT_MQTT_ENABLED=true` |
-| `backend/energy-monitor-backend/.env` | `MYSQL_PASSWORD`, `MAIL_*`, `RABBITMQ_*`, `INTERNAL_API_TOKEN`, VAPID, `EXPO_ACCESS_TOKEN` | `SECURITY_JWT_PUBLIC_KEY_PATH`, `NOTIFICATION_WEB_URL=http://localhost:5173`, `MEASUREMENT_SERVICE_URL=http://localhost:8085` |
-| `backend/en-monitor-api-gateway/.env` | — | `SECURITY_JWT_PUBLIC_KEY_PATH`, `SECURITY_CORS_ALLOWED_ORIGINS=http://localhost:5173` |
-| `frontend/energy-monitor-web/.env.local` | `VITE_GOOGLE_CLIENT_ID` | Nada más: Vite reenvía `/api` al gateway de `:8080` (otro puerto: `VITE_DEV_API_TARGET`) |
-| `frontend/energy-monitor-mobile/.env` | — | `EXPO_PUBLIC_API_BASE_URL`: `http://<IP de LAN>:8080` en modo desarrollo o `http://<IP de LAN>` con la pila completa. `EXPO_PUBLIC_EAS_PROJECT_ID`: expo.dev → proyecto → *Project settings* |
+| Archivo                                       | Valores de `infra/.env`                                                                                                                                | Propios del modo desarrollo                                                                                                                                                                  |
+| --------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `backend/en-monitor-security-service/.env`    | `MYSQL_PASSWORD`, `SECURITY_RESET_PEPPER`, `GOOGLE_CLIENT_ID/SECRET`, `RABBITMQ_*`, `INTERNAL_API_TOKEN`                                               | `SECURITY_JWT_PRIVATE_KEY_PATH`, `SECURITY_JWT_PUBLIC_KEY_PATH`, `SECURITY_SESSION_COOKIE_SECURE=false`                                                                                      |
+| `backend/en-monitor-device-service/.env`      | `MYSQL_PASSWORD`, `RABBITMQ_*`, `INTERNAL_API_TOKEN`, `MQTT_MEASUREMENT_SERVICE_USER/PASS`, `MQTT_DEVICE_SERVICE_USER/PASS`, `DEVICE_MQTT_PUBLIC_HOST` | `SECURITY_JWT_PUBLIC_KEY_PATH`                                                                                                                                                               |
+| `backend/en-monitor-measurement-service/.env` | `MYSQL_PASSWORD`, `RABBITMQ_*`, `INTERNAL_API_TOKEN`, `MQTT_MEASUREMENT_SERVICE_USER/PASS`                                                             | `SECURITY_JWT_PUBLIC_KEY_PATH`, `MEASUREMENT_MQTT_ENABLED=true`                                                                                                                              |
+| `backend/en-monitor-home-service/.env`        | `MYSQL_PASSWORD`, `RABBITMQ_*`, `INTERNAL_API_TOKEN`                                                                                                   | `SECURITY_JWT_PUBLIC_KEY_PATH`, `SECURITY_SERVICE_URL=http://localhost:8082`                                                                                                                 |
+| `backend/en-monitor-notification-service/.env` | `MYSQL_PASSWORD`, `MAIL_*`, `RABBITMQ_*`, `INTERNAL_API_TOKEN`, VAPID, `EXPO_ACCESS_TOKEN`                                                            | `SECURITY_JWT_PUBLIC_KEY_PATH`, `NOTIFICATION_WEB_URL=http://localhost:5173`, `SECURITY_SERVICE_URL`, `HOME_SERVICE_URL`, `DEVICE_SERVICE_URL` (los de `localhost`)                           |
+| `backend/en-monitor-api-gateway/.env`         | —                                                                                                                                                      | `SECURITY_JWT_PUBLIC_KEY_PATH`, `SECURITY_CORS_ALLOWED_ORIGINS=http://localhost:5173`                                                                                                        |
+| `frontend/energy-monitor-web/.env.local`      | `VITE_GOOGLE_CLIENT_ID`                                                                                                                                | Nada más: Vite reenvía `/api` al gateway de `:8080` (otro puerto: `VITE_DEV_API_TARGET`)                                                                                                     |
+| `frontend/energy-monitor-mobile/.env`         | —                                                                                                                                                      | `EXPO_PUBLIC_API_BASE_URL`: `http://<IP de LAN>:8080` en modo desarrollo o `http://<IP de LAN>` con la pila completa. `EXPO_PUBLIC_EAS_PROJECT_ID`: expo.dev → proyecto → _Project settings_ |
 
 Las rutas de las claves deben ser absolutas, porque Java no expande `~`. Los servicios del PC
 pueden usar su propio par de claves:
@@ -276,30 +308,30 @@ done      # cada variable debe dar el mismo resumen en todos sus archivos
 - **Iniciar sesión con Google:** el cliente OAuth llega al servicio de seguridad por `GOOGLE_CLIENT_ID`
   y `GOOGLE_CLIENT_SECRET` (`.env`), y al navegador por `VITE_GOOGLE_CLIENT_ID` (build-arg
   del frontend). Si Google responde **`origin_mismatch`**, falta registrar el origen en
-  Google Cloud Console → *APIs & Services → Credentials → (tu OAuth client, tipo Web
-  application)* → **Authorized JavaScript origins**: añade `http://localhost` (y la URL de
-  producción más adelante). Si la app está en modo *Testing*, agrega además la cuenta de
+  Google Cloud Console → _APIs & Services → Credentials → (tu OAuth client, tipo Web
+  application)_ → **Authorized JavaScript origins**: añade `http://localhost` (y la URL de
+  producción más adelante). Si la app está en modo _Testing_, agrega además la cuenta de
   Google en **Test users**. Sin ambos, Google bloquea el inicio de sesión.
 
 ## Imágenes
 
-| Imagen | Origen | Notas |
-|---|---|---|
-| `energy-monitor-gateway:local` | `../backend/en-monitor-api-gateway/Dockerfile` | Multi-stage Maven + JRE 21, uid 10001. Solo recibe `public.pem`. |
-| `energy-monitor-security:local` | `../backend/en-monitor-security-service/Dockerfile` | Igual; lee `private.pem`, así que corre como `BACKEND_UID:BACKEND_GID`. |
-| `energy-monitor-device:local` | `../backend/en-monitor-device-service/Dockerfile` | Igual; solo recibe `public.pem`. |
-| `energy-monitor-measurement:local` | `../backend/en-monitor-measurement-service/Dockerfile` | Igual; solo recibe `public.pem`. Suscrito a la telemetría (`MEASUREMENT_MQTT_ENABLED=true`). |
-| `energy-monitor-backend:local` | `../backend/energy-monitor-backend/Dockerfile` | Igual; solo recibe `public.pem`. |
-| `energy-monitor-frontend:local` | `../frontend/energy-monitor-web/Dockerfile` | Build con Vite y se sirve con nginx. |
-| `mysql:8.4` | Docker Hub | Base de datos compartida por los servicios, con volumen `mysql-data`. |
-| `rabbitmq:4.1-management` | Docker Hub | Eventos de cuentas, hogares y dispositivos y pedidos de correo (outbox), con volumen `rabbitmq-data`. |
-| `iegomez/mosquitto-go-auth:3.0.0-mosquitto_2.0.18` | Docker Hub | Broker MQTT; autentica contra el servicio de dispositivos. |
+| Imagen                                             | Origen                                                 | Notas                                                                                                 |
+| -------------------------------------------------- | ------------------------------------------------------ | ----------------------------------------------------------------------------------------------------- |
+| `energy-monitor-gateway:local`                     | `../backend/en-monitor-api-gateway/Dockerfile`         | Multi-stage Maven + JRE 21, uid 10001. Solo recibe `public.pem`.                                      |
+| `energy-monitor-security:local`                    | `../backend/en-monitor-security-service/Dockerfile`    | Igual; lee `private.pem`, así que corre como `BACKEND_UID:BACKEND_GID`.                               |
+| `energy-monitor-device:local`                      | `../backend/en-monitor-device-service/Dockerfile`      | Igual; solo recibe `public.pem`.                                                                      |
+| `energy-monitor-measurement:local`                 | `../backend/en-monitor-measurement-service/Dockerfile` | Igual; solo recibe `public.pem`. Suscrito a la telemetría (`MEASUREMENT_MQTT_ENABLED=true`).          |
+| `energy-monitor-home:local`                        | `../backend/en-monitor-home-service/Dockerfile`        | Igual; solo recibe `public.pem`.                                                                      |
+| `energy-monitor-frontend:local`                    | `../frontend/energy-monitor-web/Dockerfile`            | Build con Vite y se sirve con nginx.                                                                  |
+| `mysql:8.4`                                        | Docker Hub                                             | Base de datos compartida por los servicios, con volumen `mysql-data`.                                 |
+| `rabbitmq:4.1-management`                          | Docker Hub                                             | Eventos de cuentas, hogares y dispositivos y pedidos de correo (outbox), con volumen `rabbitmq-data`. |
+| `iegomez/mosquitto-go-auth:3.0.0-mosquitto_2.0.18` | Docker Hub                                             | Broker MQTT; autentica contra el servicio de dispositivos.                                            |
 
 El frontend se construye con `VITE_API_BASE_URL` **vacío**, así que el navegador
 llama a `/api/v1/...` en su propio origen y nginx lo reenvía a `gateway:8080`
-(mismo origen: **no hace falta CORS**). Los cinco servicios Java tienen `healthcheck` con
-`/actuator/health`; el de los servicios de seguridad y de dispositivos y el del backend incluyen
-RabbitMQ y MySQL.
+(mismo origen: **no hace falta CORS**). Los seis servicios Java tienen `healthcheck` con
+`/actuator/health`; el de los servicios de seguridad, dispositivos, mediciones y hogares y el del
+backend incluyen RabbitMQ y MySQL.
 
 ## Modo desarrollo (servicios en el PC)
 
@@ -307,12 +339,15 @@ Para trabajar los servicios desde el IDE o con `./mvnw spring-boot:run` / `./mvn
 solo MySQL, RabbitMQ y el broker, y cada servicio en su terminal:
 
 ```bash
-docker compose stop gateway security device measurement backend frontend    # si la pila completa estaba arriba
+docker compose stop gateway security device measurement home notification alert recommendation frontend    # si la pila completa estaba arriba
 docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d mysql rabbitmq mosquitto
 cd ../backend/en-monitor-security-service && ./mvnw spring-boot:run   # :8082
 cd ../backend/en-monitor-device-service   && ./mvnw spring-boot:run   # :8084
 cd ../backend/en-monitor-measurement-service && ./mvnw spring-boot:run   # :8085
-cd ../backend/energy-monitor-backend      && ./mvnw spring-boot:run   # :8083
+cd ../backend/en-monitor-home-service     && ./mvnw spring-boot:run   # :8086
+cd ../backend/en-monitor-notification-service && ./mvnw spring-boot:run   # :8087
+cd ../backend/en-monitor-alert-service && ./mvnw spring-boot:run   # :8088
+cd ../backend/en-monitor-recommendation-service && ./mvnw spring-boot:run   # :8089
 cd ../backend/en-monitor-api-gateway      && ./mvnw spring-boot:run   # :8080
 ```
 
@@ -332,16 +367,16 @@ cd ../backend/en-monitor-api-gateway      && ./mvnw spring-boot:run   # :8080
 
 ## Producción (servidor)
 
-`docker-compose.prod.yml` corre MySQL, RabbitMQ, broker, el gateway, los cuatro servicios y el frontend en un servidor (VPS Ubuntu con
-Docker, Nginx y Certbot). El procedimiento completo, con verificación y reversión, está en el
+`docker-compose.prod.yml` corre MySQL, RabbitMQ, broker, el gateway, los cinco servicios y el
+frontend en un servidor (VPS Ubuntu con Docker, Nginx y Certbot). El procedimiento completo, con verificación y reversión, está en el
 manual de despliegue (`energy-monitor-docs-final/17-despliegue`). En resumen:
 
 1. **DNS**: registros A de `DOMINIO`, `www.DOMINIO` y `mqtt.DOMINIO` hacia la IP del VPS.
 2. **Servidor**: Docker, Nginx y Certbot; firewall con 22, 80, 443 y 8883 abiertos.
 3. **Código** en `/opt/energy-monitor` (`infra`, `backend/energy-monitor-backend`,
    `backend/en-monitor-security-service`, `backend/en-monitor-device-service`,
-   `backend/en-monitor-measurement-service`, `backend/en-monitor-api-gateway`,
-   `frontend/energy-monitor-web`), como en "Requisitos".
+   `backend/en-monitor-measurement-service`, `backend/en-monitor-home-service`,
+   `backend/en-monitor-api-gateway`, `frontend/energy-monitor-web`), como en "Requisitos".
 4. **Claves JWT** en `JWT_KEYS_DIR` (`/opt/energy-monitor/keys`): `private.pem` legible por
    `BACKEND_UID` (10001, el servicio de seguridad) y `public.pem` legible por todos (644).
 5. **Nginx y certificados**: `deploy/nginx-energy-monitor.conf` (sitio que reenvía todo el dominio a
@@ -400,19 +435,344 @@ tener ya su `Dockerfile` en `main`.
 5. Los changesets `measurement-001` a `measurement-003` ya aplicados por el backend se reconocen en
    `DATABASECHANGELOG`.
 
+### Servicio de hogares
+
+`home` atiende los hogares, sus miembros y umbrales y los tipos de hogar, y responde a los otros
+servicios quién puede actuar sobre un hogar. El gateway le manda `/api/v1/homes/**` (salvo los
+dispositivos y el consumo de un hogar) y `/api/v1/home-types/**`; seguridad, dispositivos y
+mediciones le preguntan en `HOME_SERVICE_URL`, y el backend lee de él los hogares de las alertas,
+notificaciones y recomendaciones. Es el único dueño de las tablas `home*`: publica `home.deleted`
+desde su outbox (`HOME_OUTBOX_RELAY_ENABLED`) y limpia las cuentas borradas en la cola
+`home-service.home.account-deleted` (`ACCOUNT_DELETED_CONSUMER_ENABLED`), las dos encendidas por
+defecto. En `false` solo sirven para volver atrás a un backend que aún tenga su módulo de hogares,
+que hacía ambas cosas: con los dos encendidos cada mensaje se procesaría dos veces.
+
+**Corte desde el despliegue en dos pasos** (el servidor tenía el servicio de hogares con los dos
+interruptores apagados y el backend con su módulo de hogares):
+
+1. Respaldo de MySQL (`deploy/backup-mysql.sh`).
+2. `deploy/deploy.sh infra`: recrea `home` con el relay y el consumidor encendidos y quita
+   `BACKEND_INTERNAL_URL` de seguridad, dispositivos y mediciones (ya preguntan al servicio de
+   hogares).
+3. Enseguida `deploy/deploy.sh backend`, con el backend sin módulo de hogares. Entre los dos pasos
+   los dos relays y los dos consumidores corren a la vez: un `home.deleted` puede salir dos veces y
+   un `account.deleted` procesarse dos veces, lo que los consumidores toleran (son idempotentes).
+   El orden inverso perdería los `account.deleted` de ese intervalo.
+4. La cola del backend ya no tiene consumidor y se llenaría con cada cuenta borrada: bórrala.
+
+   ```bash
+   docker compose -f docker-compose.prod.yml --env-file .env.prod exec rabbitmq \
+     rabbitmqctl delete_queue energy-monitor-backend.home.account-deleted
+   docker compose -f docker-compose.prod.yml --env-file .env.prod exec rabbitmq \
+     rabbitmqctl delete_queue energy-monitor-backend.home.account-deleted.dlq
+   ```
+
+**Primer despliegue con el servicio de hogares:** el contenedor `home` debe estar arriba **antes**
+que el gateway con las rutas nuevas y que los servicios que le preguntan; si no, esas rutas
+responden 503.
+
+1. Respaldo de MySQL (`deploy/backup-mysql.sh`).
+2. Clona `en-monitor-home-service` en `backend/` (`-b main`) y agrega a `.env.prod` `HOME_CONTEXT`.
+   No necesita secretos nuevos: usa `MYSQL_PASSWORD`, `RABBITMQ_*` e `INTERNAL_API_TOKEN`.
+3. `deploy/deploy.sh infra`: construye el servicio de hogares y recrea el resto con
+   `HOME_SERVICE_URL`. Los changesets `home-001` a `home-007` ya aplicados por el backend se
+   reconocen en `DATABASECHANGELOG` y no se ejecuta ninguno.
+4. Después, en cualquier orden: `deploy.sh gateway`, `security`, `device`, `measurement` y
+   `backend`, con las versiones que llaman al servicio de hogares.
+
+### Servicio de notificaciones
+
+`notification` atiende los canales de cada usuario (preferencias de correo y push, suscripciones
+Web Push de los navegadores y dispositivos de la app) y las notificaciones de los administradores:
+el gateway le manda `/api/v1/notifications/**` y `/api/v1/admin/notifications/**`. Pregunta a
+seguridad (nombres, correos, administradores y el permiso `USER.READ`), a hogares (miembros y
+nombre de un hogar) y a dispositivos (nombre de un dispositivo). Usa las tablas `notification`,
+`notification_preference`, `push_subscription` y `push_device` de la base compartida.
+
+Recibe las variables de correo, `NOTIFICATION_WEB_URL`, las llaves VAPID y `EXPO_ACCESS_TOKEN`
+(el backend ya no las usa). **Las llaves VAPID deben ser las que tenía el backend**: cada navegador
+liga su suscripción a la pública, y con otras dejaría de recibir push.
+
+Es el único que atiende los eventos de cuenta y los códigos de correo y que entrega las alertas y
+recomendaciones: el backend ya no tiene módulo de notificaciones. Tres interruptores, encendidos por
+defecto; en `false` solo sirven para volver atrás a un backend que aún tenga el módulo (el cuarto,
+de la actividad, se explica más abajo):
+
+| Variable | Servicio | Qué enciende |
+|---|---|---|
+| `SECURITY_EVENTS_CONSUMER_ENABLED` | notification | Colas `notification-service.notification.account-events` y `.mail`: notificaciones de administrador, limpieza de cuentas borradas y envío de los códigos |
+| `ALERT_EVENTS_CONSUMER_ENABLED` | notification | Colas `notification-service.notification.alert-raised` y `.recommendation-created`: entrega de alertas y recomendaciones |
+| `ALERT_OUTBOX_RELAY_ENABLED` | backend | Publica `alert.raised` y `recommendation.created` desde `backend_outbox` |
+| `ACTIVITY_CONSUMER_ENABLED` | notification | Cola `notification-service.notification.activity`: bienvenida y actividad de hogares y dispositivos |
+
+Con el relay apagado el backend guarda sus eventos en `backend_outbox` sin publicarlos, y los
+publica en orden cuando se enciende.
+
+**Primer despliegue con el servicio de notificaciones:** el contenedor `notification` debe estar
+arriba **antes** que el gateway con las rutas nuevas; si no, esas rutas responden 503.
+
+1. Respaldo de MySQL (`deploy/backup-mysql.sh`).
+2. Clona `en-monitor-notification-service` en `backend/` (`-b main`) y agrega a `.env.prod`
+   `NOTIFICATION_CONTEXT`. No necesita secretos nuevos: usa los de correo, VAPID, Expo,
+   `MYSQL_PASSWORD`, `RABBITMQ_*` e `INTERNAL_API_TOKEN` que ya tiene el backend.
+3. `deploy/deploy.sh infra`: construye el servicio de notificaciones con los interruptores
+   apagados. Los changesets `notification-001` a `notification-005` ya aplicados por el backend se
+   reconocen en `DATABASECHANGELOG` y no se ejecuta ninguno.
+4. `deploy/deploy.sh backend`, con el outbox (changeset `outbox-001`, relay apagado), y después
+   `deploy/deploy.sh gateway`, con las rutas al servicio.
+
+**Corte desde ese despliegue** (el servicio de notificaciones con los interruptores apagados y el
+backend con su módulo de notificaciones):
+
+1. Respaldo de MySQL (`deploy/backup-mysql.sh`).
+2. Descarta las alertas y recomendaciones que el backend guardó en el outbox mientras las entregaba
+   él mismo; si no, el servicio las enviaría otra vez:
+
+   ```bash
+   docker compose -f docker-compose.prod.yml --env-file .env.prod exec mysql \
+     sh -c 'mysql -uroot -p"$MYSQL_ROOT_PASSWORD" energy_monitor -e "UPDATE backend_outbox SET discarded_at = NOW() WHERE published_at IS NULL AND discarded_at IS NULL"'
+   ```
+
+3. `deploy/deploy.sh infra`: recrea `notification` con los consumidores encendidos y el backend
+   con el relay encendido, sin las variables de correo, push y `SECURITY_SERVICE_URL`.
+4. Enseguida `deploy/deploy.sh backend`, con el backend sin módulo de notificaciones. Entre los dos
+   pasos el backend todavía entrega en proceso y el servicio también: un código de correo no sale
+   dos veces (el id del mensaje es el id del envío en la tabla compartida), pero una alerta o una
+   notificación de administrador de ese intervalo puede llegar dos veces. El orden inverso dejaría
+   ese intervalo sin códigos ni alertas.
+5. Las colas del backend ya no tienen consumidor y se llenarían con cada evento de cuenta: bórralas.
+   El servicio recibe los mismos mensajes en las suyas.
+
+   ```bash
+   for q in energy-monitor-backend.notification.account-events energy-monitor-backend.notification.mail; do
+     for s in "" .dlq; do
+       docker compose -f docker-compose.prod.yml --env-file .env.prod exec rabbitmq \
+         rabbitmqctl delete_queue "$q$s"
+     done
+   done
+   ```
+
+6. Si habías puesto `SECURITY_EVENTS_CONSUMER_ENABLED`, `ALERT_EVENTS_CONSUMER_ENABLED` o
+   `ALERT_OUTBOX_RELAY_ENABLED` en `false` en `.env.prod`, bórralos.
+
+**Volver atrás** a un backend con módulo de notificaciones: pon los tres interruptores en `false`
+en `.env.prod`, `deploy/deploy.sh infra` y despliega esa versión del backend.
+
+#### Notificaciones de actividad
+
+Además de las alertas y recomendaciones, el servicio cuenta a cada persona lo que pasó en su cuenta
+y en sus hogares, por los canales que eligió en Configuración (correo y push) y siempre en la
+bandeja de la web y la app (pestaña **Actividad**, con filtro por hogar):
+
+| Evento | Lo publica | A quién le llega |
+|---|---|---|
+| `account.first-signed-in` | security, en el primer ingreso de una cuenta verificada | La cuenta: bienvenida |
+| `home.created` | home | Quien lo creó |
+| `home.member-joined` | home | Quien se unió ("te uniste") y los demás miembros |
+| `home.thresholds-updated` | home | Los miembros, menos quien los cambió |
+| `home.member-left` | home | Los miembros que quedan |
+| `home.member-removed` | home | Quien fue quitado y los demás, menos el propietario que lo quitó |
+| `home.ownership-transferred` | home | El nuevo propietario, el anterior y los demás, cada uno con su texto |
+| `home.deleted` | home | Los miembros que tenía; quien lo borró, con su texto |
+| `device.linked` / `device.unlinked` | device | Los miembros del hogar |
+
+Todo entra por una sola cola, `notification-service.notification.activity` (con su `.dlq`), que el
+servicio declara al arrancar si `ACTIVITY_CONSUMER_ENABLED` no es `false`. Un mensaje repetido se
+descarta por su id. Cada notificación guarda la clave del texto (`activity.home.member-joined.v1`)
+y los nombres de ese momento (`message_params`, changeset `notification-007`): la web y la app la
+traducen al idioma del usuario, y "Se eliminó «Casa»" se sigue leyendo aunque el hogar ya no exista.
+`home.deleted` y `home.ownership-transferred` traen ahora el nombre del hogar y sus miembros; el
+servicio de dispositivos ignora los campos que no conoce.
+
+**Despliegue: primero `notification`, después `security` y `home`.** Los dos publican estos eventos
+desde su outbox, y un outbox se detiene ante un mensaje que ninguna cola recibe: si salen antes de
+que exista la cola, sus demás eventos (`account.deleted`, `home.deleted`, …) quedan esperando
+detrás.
+
+1. Respaldo de MySQL (`deploy/backup-mysql.sh`).
+2. `deploy/deploy.sh notification`: aplica `notification-006` y `notification-007` y declara la cola.
+   Comprueba que existe:
+
+   ```bash
+   docker compose -f docker-compose.prod.yml --env-file .env.prod exec rabbitmq \
+     rabbitmqctl list_queues name messages | grep notification.activity
+   ```
+
+3. `deploy/deploy.sh security` y `deploy/deploy.sh home`, en cualquier orden.
+4. `deploy/deploy.sh frontend`; la app móvil, con su próxima versión. Las dos piden la actividad a
+   `/api/v1/notifications/activity`, que el gateway ya manda al servicio.
+
+**Volver atrás:** las versiones anteriores de seguridad y hogares no publican estos eventos, así
+que basta con desplegarlas. Para dejar de entregar la actividad sin bajar de versión, pon
+`ACTIVITY_CONSUMER_ENABLED=false` en `.env.prod` y `deploy/deploy.sh infra`; **antes** borra la cola
+y su `.dlq` (`rabbitmqctl delete_queue`), o se llenaría con cada evento.
+
+### Servicio de alertas
+
+`alert` crea las alertas de un hogar —una lectura sobre el umbral de potencia (HIGH/CRITICAL), el
+límite de consumo del hogar alcanzado, un dispositivo que perdió la conexión y la primera lectura de
+un dispositivo recién vinculado— y las anuncia (`alert.raised`) al servicio de notificaciones, que
+las entrega. El gateway le manda `/api/v1/alerts/**`, con las mismas rutas y respuestas que tenía el
+backend. Pregunta a hogares (quién es miembro y los límites), a dispositivos (el hogar de un
+dispositivo) y a mediciones (niveles de consumo y energía). Usa la tabla `alert`, la misma que el
+backend, y su propio outbox, `alert_outbox` (changeset `alert-004`).
+
+| Variable | Servicio | Qué enciende |
+|---|---|---|
+| `ALERT_CONSUMERS_ENABLED` | alert | Colas `alert-service.measurement.recorded` y `alert-service.device.events`: crear las alertas. Encendido por defecto desde el retiro del backend |
+| `ALERT_SERVICE_OUTBOX_RELAY_ENABLED` | alert | Publica `alert.raised` desde `alert_outbox`. Encendido por defecto |
+
+Las dos colas se declaran siempre al arrancar, con el interruptor apagado también: así acumulan las
+lecturas y los eventos de dispositivos mientras el backend todavía crea las alertas desde las suyas.
+Con los dos creándolas, cada alerta saldría dos veces.
+
+**Primer despliegue con el servicio de alertas** (el backend sigue creando las alertas):
+
+1. Respaldo de MySQL (`deploy/backup-mysql.sh`).
+2. Clona `en-monitor-alert-service` en `backend/` (`-b main`) y agrega a `.env.prod`
+   `ALERT_CONTEXT`. No necesita secretos nuevos: usa `MYSQL_PASSWORD`, `RABBITMQ_*`,
+   `INTERNAL_API_TOKEN` y la llave pública que ya tienen los otros servicios.
+3. `deploy/deploy.sh infra`: construye `alert` con los consumidores apagados. Los changesets
+   `alert-001` a `alert-003` ya aplicados por el backend se reconocen en `DATABASECHANGELOG`; solo
+   se ejecuta `alert-004` (crea `alert_outbox`).
+4. `deploy/deploy.sh gateway`, con `/api/v1/alerts/**` al servicio. **Después** del paso 3: con el
+   gateway nuevo y sin el contenedor, las alertas responden 503. Las dos versiones leen la misma
+   tabla, así que la web y la app ven las mismas alertas.
+
+**Corte**, cuando `main` del backend ya no tenga el módulo de alertas:
+
+1. Respaldo de MySQL (`deploy/backup-mysql.sh`).
+2. Vacía las colas del servicio. Lo que guardan ya lo procesó el backend, y una lectura vieja podría
+   volver a crear una alerta que ya se resolvió:
+
+   ```bash
+   for q in alert-service.measurement.recorded alert-service.device.events; do
+     docker compose -f docker-compose.prod.yml --env-file .env.prod exec rabbitmq \
+       rabbitmqctl purge_queue "$q"
+   done
+   ```
+
+3. Enseguida `deploy/deploy.sh backend`, el backend sin módulo de alertas. Desde aquí nadie crea
+   alertas, pero no se pierde nada: las colas del servicio guardan lo que va llegando.
+4. Pon `ALERT_CONSUMERS_ENABLED=true` en `.env.prod` y `deploy/deploy.sh infra`: el servicio
+   procesa lo que se acumuló desde el paso 3 y sigue. Solo lo que llegó entre los pasos 2 y 3 lo
+   procesan los dos; una alerta que el backend dejó pendiente no se repite, porque las reglas
+   miran la misma tabla.
+5. El backend sin alertas ya no consume `energy-monitor-backend.measurement.recorded`: bórrala
+   con su `.dlq`, o se llenaría con cada lectura. Su cola `energy-monitor-backend.device.events`
+   sigue (escucha los vínculos para las recomendaciones), pero RabbitMQ conserva las uniones a
+   `device.connectivity-*` de la versión anterior: bórrala también y reinicia el backend, que la
+   declara de nuevo solo con `device.linked` y `device.unlinked`. Mientras tanto descarta esos
+   eventos sin error.
+
+   ```bash
+   for q in energy-monitor-backend.measurement.recorded energy-monitor-backend.device.events; do
+     for s in "" .dlq; do
+       docker compose -f docker-compose.prod.yml --env-file .env.prod exec rabbitmq \
+         rabbitmqctl delete_queue "$q$s"
+     done
+   done
+   docker compose -f docker-compose.prod.yml --env-file .env.prod restart backend
+   ```
+
+**Volver atrás:** `ALERT_CONSUMERS_ENABLED=false` en `.env.prod`, `deploy/deploy.sh infra` y
+despliega una versión del backend con el módulo de alertas. El gateway puede quedar como está.
+
+### Servicio de recomendaciones
+
+`recommendation` revisa cada hora la energía por hora de los hogares cuyos dispositivos reportaron
+en la última semana y guarda una recomendación cuando una regla se cumple: la mayor parte de la
+energía en el pico de la tarde, un dispositivo consumiendo de noche, una semana muy por encima de
+la anterior, un ritmo que supera el límite del hogar o un dispositivo que consume más que antes. El
+mismo consejo no se repite en 7 días. Las anuncia (`recommendation.created`) al servicio de
+notificaciones, y el gateway le manda `/api/v1/recommendations/**`, con las mismas rutas y
+respuestas que tenía el backend. Pregunta a hogares (quién es miembro y el límite), a dispositivos
+(los dispositivos de un hogar y sus nombres) y a mediciones (energía por hora y quién reporta). Usa
+la tabla `recommendation`, la misma que el backend, y su propio outbox, `recommendation_outbox`
+(changeset `recommendation-002`).
+
+| Variable | Servicio | Qué enciende |
+|---|---|---|
+| `RECOMMENDATION_SCHEDULER_ENABLED` | recommendation | La evaluación cada hora. Encendida por defecto desde el retiro del backend |
+| `RECOMMENDATION_OUTBOX_RELAY_ENABLED` | recommendation | Publica `recommendation.created` desde `recommendation_outbox`. Encendido por defecto |
+
+Con la evaluación encendida en los dos, el mismo consejo podría guardarse y anunciarse dos veces.
+El servicio no escucha eventos: no hay colas que vaciar en el corte.
+
+**Primer despliegue con el servicio de recomendaciones** (el backend sigue evaluando):
+
+1. Respaldo de MySQL (`deploy/backup-mysql.sh`).
+2. Clona `en-monitor-recommendation-service` en `backend/` (`-b main`) y agrega a `.env.prod`
+   `RECOMMENDATION_CONTEXT`. No necesita secretos nuevos.
+3. `deploy/deploy.sh infra`: construye `recommendation` con la evaluación apagada. El changeset
+   `recommendation-001` ya aplicado por el backend se reconoce en `DATABASECHANGELOG`; solo se
+   ejecuta `recommendation-002` (crea `recommendation_outbox`).
+4. `deploy/deploy.sh gateway`, con `/api/v1/recommendations/**` al servicio. **Después** del paso
+   3: sin el contenedor, las recomendaciones responderían 503. Las dos versiones leen la misma
+   tabla.
+
+**Corte**, que es también el retiro del backend: cuando `main` del backend ya no tenga el módulo de
+recomendaciones y `main` de infra y del gateway ya no tengan el backend:
+
+1. Respaldo de MySQL (`deploy/backup-mysql.sh`).
+2. Comprueba que el backend ya publicó todo su outbox. Lo que quede en `backend_outbox` sin
+   publicar no lo publicará nadie después del corte:
+
+   ```bash
+   docker compose -f docker-compose.prod.yml --env-file .env.prod exec mysql \
+     sh -c 'mysql -uroot -p"$MYSQL_ROOT_PASSWORD" energy_monitor -e "SELECT COUNT(*) FROM backend_outbox WHERE published_at IS NULL AND discarded_at IS NULL"'
+   ```
+
+   Debe dar `0`. Si no baja, `last_error` de esas filas dice por qué.
+3. Pon `RECOMMENDATION_SCHEDULER_ENABLED=true` en `.env.prod` y `deploy/deploy.sh infra`: retira el
+   contenedor `backend` y recrea `recommendation` con la evaluación encendida. La evaluación es
+   cada hora, así que entre los dos no se pierde ninguna.
+4. `deploy/deploy.sh gateway`, sin la ruta al backend.
+5. Borra las colas del backend, que ya no tienen consumidor (`rabbitmqctl delete_queue`, cada una
+   con su `.dlq`): `energy-monitor-backend.device.events` y las que hayan quedado de cortes
+   anteriores.
+
+**Volver atrás:** `RECOMMENDATION_SCHEDULER_ENABLED=false` en `.env.prod` y despliega las
+versiones de infra, gateway y backend anteriores al retiro.
+
+### Retiro de energy-monitor-backend
+
+Desde esta versión, `docker-compose*.yml` ya no tiene el contenedor `backend`, el gateway responde
+404 a lo que ninguna ruta atiende y `ALERT_CONSUMERS_ENABLED` y `RECOMMENDATION_SCHEDULER_ENABLED`
+vienen **encendidos** por defecto: ya no hay un backend que también cree alertas o evalúe. Una
+instalación nueva no necesita nada más.
+
+Un servidor que todavía corre el backend hace los dos cortes de una vez:
+
+1. Respaldo de MySQL (`deploy/backup-mysql.sh`).
+2. Si el backend todavía creaba las alertas, vacía las colas del servicio de alertas (paso 2 del
+   corte de "Servicio de alertas").
+3. Comprueba que `backend_outbox` no tenga mensajes pendientes (paso 2 del corte de "Servicio de
+   recomendaciones").
+4. Quita de `.env.prod` `ALERT_CONSUMERS_ENABLED=false` y `RECOMMENDATION_SCHEDULER_ENABLED=false`
+   si los pusiste, y `deploy/deploy.sh infra`: retira el contenedor `backend` (`--remove-orphans`) y
+   enciende alertas y recomendaciones.
+5. `deploy/deploy.sh gateway`, sin la ruta al backend.
+6. Borra las colas `energy-monitor-backend.*` con su `.dlq` (`rabbitmqctl delete_queue`): ya nadie
+   las consume.
+
+`deploy.sh` ya no acepta `backend`. El repositorio `energy-monitor-backend` queda archivado, pero
+no se borra: guarda el firmware del ESP32 (`firmware/`), al que `prepare.sh` le escribe `dev_ca.h`.
+La tabla `backend_outbox` queda en la base sin uso.
+
 ## CI/CD con GitHub Actions
 
-Cada repositorio (gateway, servicios de seguridad, dispositivos y mediciones, backend, web e infra) tiene
+Cada repositorio (gateway, servicios de seguridad, dispositivos, mediciones y hogares, backend, web e infra) tiene
 `.github/workflows/ci-cd.yml`:
 
-- **CI** en cada PR y push a `dev`/`main`: backend y servicios de seguridad, dispositivos y mediciones `./mvnw test` contra
+- **CI** en cada PR y push a `dev`/`main`: backend y servicios de seguridad, dispositivos, mediciones y hogares `./mvnw test` contra
   MySQL 8.4 (servicio del runner), gateway `./mvnw test` (no necesita nada más), web `vitest` +
   `npm run build`, infra `docker compose config` de los tres modos, `shellcheck` y `nginx -t` de la
   plantilla.
-- **CD** solo desde `main` (push o *Run workflow*), después de los tests y de la aprobación del
+- **CD** solo desde `main` (push o _Run workflow_), después de los tests y de la aprobación del
   environment `production`: entra por SSH al VPS y ejecuta
-  `deploy/deploy.sh backend|security|device|measurement|gateway|frontend|infra`. El script respalda MySQL, hace
-  `git pull` de `main`, reconstruye solo ese servicio y espera a que los cinco servicios Java estén
+  `deploy/deploy.sh backend|security|device|measurement|home|gateway|frontend|infra`. El script respalda MySQL, hace
+  `git pull` de `main`, reconstruye solo ese servicio y espera a que los seis servicios Java estén
   `healthy`, la web responda 200 y `/api/v1/homes` responda 401 a través del gateway; si falla,
   vuelve a la versión anterior y el job queda en rojo.
 
@@ -445,17 +805,21 @@ El código de los servicios ya trae la integración; infra solo conecta las piez
 
 ## Puertos publicados
 
-| Puerto | Servicio | Para qué |
-|---|---|---|
-| 80 | frontend (nginx) | La web; reenvía `/api/` al gateway. |
-| 8883 | mosquitto | MQTT sobre TLS, para los dispositivos. |
-| 1883 | mosquitto | MQTT sin TLS, solo en `127.0.0.1`. |
-| 3306 | mysql | Base de datos, solo en `127.0.0.1` (para depurar desde este PC). |
-| 5672 | rabbitmq | AMQP, solo en `127.0.0.1` (servicios del PC en modo desarrollo). |
-| 15672 | rabbitmq | Consola web, solo en `127.0.0.1`. |
+| Puerto | Servicio         | Para qué                                                         |
+| ------ | ---------------- | ---------------------------------------------------------------- |
+| 80     | frontend (nginx) | La web; reenvía `/api/` al gateway.                              |
+| 8080   | gateway          | La API para la app móvil en la LAN (`http://<IP de LAN>:8080`).  |
+| 8883   | mosquitto        | MQTT sobre TLS, para los dispositivos.                           |
+| 1883   | mosquitto        | MQTT sin TLS, solo en `127.0.0.1`.                               |
+| 3306   | mysql            | Base de datos, solo en `127.0.0.1` (para depurar desde este PC). |
+| 5672   | rabbitmq         | AMQP, solo en `127.0.0.1` (servicios del PC en modo desarrollo). |
+| 15672  | rabbitmq         | Consola web, solo en `127.0.0.1`.                                |
 
-El gateway (8080), el servicio de seguridad (8082), el backend (8083) y el servicio de dispositivos
-(8084) no publican puertos en la pila completa.
+El servicio de seguridad (8082), el backend (8083) y el servicio de dispositivos (8084) no publican
+puertos en la pila completa. El gateway (8080) sí, solo en la pila local y para la app móvil: ahí
+los clientes de la LAN llegan sin el nginx delante y el gateway puede verlos con la IP del puente
+de Docker, así que confiaría en un `X-Forwarded-For` enviado por el cliente (límite de intentos).
+En producción no se publica: la app usa `https://DOMINIO`.
 
 ## Comandos útiles
 
@@ -470,13 +834,14 @@ docker compose up -d --build backend  # reconstruir solo el backend
 ## Verificación
 
 ```bash
-docker compose ps                                                     # gateway, security, device, measurement, backend (healthy)
+docker compose ps                                                     # gateway, security, device, measurement, home, notification, backend (healthy)
 curl -s -o /dev/null -w '%{http_code}\n' http://localhost/          # 200 (web)
 curl -s -o /dev/null -w '%{http_code}\n' http://localhost/api/v1/homes  # 401 sin sesión: lo responde el gateway
 curl -s -o /dev/null -w '%{http_code}\n' -X POST -H 'Content-Type: application/json' -d '{}' \
   http://localhost/api/v1/auth/login                                  # 400: llegó al servicio de seguridad
 curl -s -o /dev/null -w '%{http_code}\n' http://localhost/api/v1/appliance-types  # 401: ruta del servicio de dispositivos
 curl -s -o /dev/null -w '%{http_code}\n' http://localhost/api/v1/consumption-levels  # 401: ruta del servicio de mediciones
+curl -s -o /dev/null -w '%{http_code}\n' http://localhost/api/v1/home-types  # 401: ruta del servicio de hogares
 # MQTT: los dos servicios ya están suscritos; confírmalo en el log del broker
 docker compose logs mosquitto | grep "New client connected"          # ... u'em-measurement-service' y u'em-device-service'
 ```
@@ -490,8 +855,10 @@ Con la pila completa arriba y los cinco servicios `(healthy)`:
 ```
 
 Crea una cuenta (`MAIL_USERNAME` con el sufijo `+e2e-…`, porque el registro exige un dominio que
-reciba correo) y un hogar de prueba; comprueba que sin verificar el correo el
-login responde 403 y marca la dirección como verificada en la base. Luego recorre lo que cruza los servicios:
+reciba correo) y un hogar de prueba; comprueba que el registro responde 202 sin crear la cuenta,
+que sin verificar el correo el login responde 403, y verifica la dirección por la API con el código
+calculado como lo calcula el servicio de seguridad (con `SECURITY_RESET_PEPPER` del `.env`): ahí se
+crea la cuenta y se borra la solicitud de registro. Luego recorre lo que cruza los servicios:
 rutas del gateway, vincular un módulo (el servicio de dispositivos pregunta al backend), el broker
 autenticando contra `device:8084` (clave correcta e incorrecta), telemetría (`ONLINE` en el servicio
 de dispositivos y la lectura guardada en el servicio de mediciones), estado `offline` (evento
@@ -502,7 +869,6 @@ que pasaron y sale con error si alguna falla. No imprime la API key del módulo.
 
 Publicar telemetría de prueba requiere un dispositivo aprovisionado (su `device_code`/`api_key`)
 o las credenciales del backend con ACL de publicación; el broker **no** acepta clientes anónimos.
-
 
 ### Prueba de punta a punta (servicio de mediciones)
 
@@ -516,6 +882,72 @@ se suscribe), que la anuncia por su outbox (`measurement.recorded`), que la lect
 la alerta `THRESHOLD` en el backend con el nivel que lee del servicio y la baja la resuelve, que el
 consumo del hogar, el historial, las estadísticas y los niveles responden por el gateway, y que
 `energy-monitor-backend.measurement.recorded` y su `.dlq` quedan vacías. Al final borra el hogar.
+
+### Prueba de punta a punta (notificaciones de actividad)
+
+```bash
+./e2e/activity-flow.sh
+```
+
+Crea tres cuentas de prueba (Ana, Luis y Sara, con el mismo sufijo `+e2e-…`) y recorre cada evento
+de la tabla de "Notificaciones de actividad": la bienvenida del primer ingreso (y que un segundo
+ingreso no la repite), crear el hogar, unirse, cambiar los umbrales, vincular un módulo, salir,
+transferir el hogar, quitar a un miembro y borrarlo. Para cada uno comprueba que llega a quien
+debe, con los nombres guardados, y no a quien no (quien cambió los umbrales, o quien ya no es
+miembro cuando se borra el hogar). Espera a que los outboxes de seguridad, hogares y dispositivos
+queden publicados y la cola de actividad y su `.dlq` vacías, y prueba la bandeja: filtro por hogar,
+marcar una o todas como leídas, eliminar, y que otra cuenta no puede tocarla. Luis y Sara apagan el
+correo y el push al empezar, y la prueba comprueba que no reciben ninguno pero sí ven todo en la
+bandeja. Con `MAIL_HOST` configurado, Ana deja el correo encendido, así que ese buzón recibe unos
+ocho correos de la prueba.
+
+### Prueba de punta a punta (servicio de alertas)
+
+Con la pila como queda después del corte de "Servicio de alertas": el backend sin módulo de
+alertas y el servicio con sus consumidores encendidos. En local, sin tocar `.env`:
+
+```bash
+ALERT_CONSUMERS_ENABLED=true docker compose up -d alert
+./e2e/alert-flow.sh
+```
+
+Crea una cuenta de prueba (`+e2e-alert-…`), un hogar y un módulo. Comprueba que el servicio
+consume sus dos colas y que el backend ya no consume las lecturas. Después recorre una alerta de
+punta a punta:
+- **Umbral:** una lectura alta guardada por mediciones llega por `measurement.recorded` y crea
+  **una** alerta THRESHOLD que apunta a esa lectura, aunque llegue otra lectura alta. Su
+  `alert.raised` sale de `alert_outbox` y notificaciones lo consume sin dejar nada en la `.dlq`. Una
+  lectura baja la resuelve.
+- **Dispositivo vinculado:** la primera lectura crea la alerta DEVICE.
+- **Conectividad:** el estado offline crea una alerta CONNECTIVITY y la telemetría siguiente la
+  resuelve.
+- **API por el gateway:** un hogar ajeno da 404, marcar como leída una alerta del sistema da 409,
+  y se borran una alerta y las resueltas del hogar.
+
+Al final espera las colas del servicio vacías y sin nada en sus `.dlq`, y borra el hogar.
+
+### Prueba de punta a punta (servicio de recomendaciones)
+
+Con la pila arriba, el backend retirado sin correr y el gateway con la ruta de recomendaciones:
+
+```bash
+./e2e/recommendation-flow.sh
+```
+
+Crea una cuenta de prueba (`+e2e-recommendation-…`), un hogar y un módulo de tipo televisor (la
+nevera no cuenta para el consumo en espera). Guarda directo en `measurement` una semana de
+lecturas, una por hora: mucho consumo de 18 a 22 h (hora de Bogotá) y 60 W de madrugada. Luego
+recrea el contenedor con `RECOMMENDATION_INITIAL_DELAY=PT10S` para que evalúe enseguida y
+comprueba:
+- **Reglas:** se guardan exactamente PEAK_HOURS y SAVING (con el módulo y su nombre), sin leer.
+- **Anuncio:** sus dos `recommendation.created` salen de `recommendation_outbox`, y
+  notificaciones los consume sin dejar nada en la `.dlq`.
+- **API por el gateway:** un hogar ajeno da 404, borrar una sin leer da 409, y se marcan como
+  leídas y se borran una a una y todas las leídas del hogar.
+
+Al final borra las lecturas sembradas y el hogar, y deja el contenedor con su espera normal
+(`PT2M`).
+
 ## Solución de problemas
 
 - **`required variable X is missing a value: X is required`** al levantar la pila: `X` está vacía
@@ -533,8 +965,8 @@ consumo del hogar, el historial, las estadísticas y los niveles responden por e
   El usuario de la aplicación es `energy_app` con `MYSQL_PASSWORD` (no `root`).
 
 - **`origin_mismatch` al iniciar sesión con Google:** falta `http://localhost` en
-  *Authorized JavaScript origins* del cliente OAuth (ver sección de cuentas arriba) y, en
-  modo *Testing*, la cuenta en *Test users*.
+  _Authorized JavaScript origins_ del cliente OAuth (ver sección de cuentas arriba) y, en
+  modo _Testing_, la cuenta en _Test users_.
 
 - **El frontend repite `401` en `/api/v1/homes`:** es lo esperado sin sesión; inicia sesión
   (registro o Google) y el error desaparece.
@@ -564,7 +996,7 @@ consumo del hogar, el historial, las estadísticas y los niveles responden por e
   ejecuta sus changesets sobre la base nueva. Es normal; espera a `(healthy)` en `docker compose ps`.
 
 - **La API responde `503` por la web:** el gateway no alcanza al servicio de esa ruta. Mira
-  `docker compose ps` y `docker compose logs security device measurement backend`.
+  `docker compose ps` y `docker compose logs security device measurement home backend`.
 
 - **El servicio de seguridad queda `unhealthy` con RabbitMQ arriba:** `RABBITMQ_USERNAME` /
   `RABBITMQ_PASSWORD` no coinciden con el usuario que RabbitMQ creó la primera vez que arrancó su
